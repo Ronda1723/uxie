@@ -1,0 +1,55 @@
+# Build outputs
+build/
+miniflow-engine/dist/
+miniflow-engine/build/
+miniflow-engine/__pycache__/
+miniflow-engine/*.spec
+**/__pycache__/
+**/*.pyc
+
+# Node / Vite / Electron
+node_modules/
+dist/
+miniflow-electron/node_modules/
+miniflow-electron/dist/
+
+# Rust
+native-helper/target/
+
+# Python venvs
+miniflow-engine/.venv/
+miniflow-engine/venv/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Runtime / user data (never commit)
+*.log
+*.pid
+llm_keys.json
+hotkey.json
+dictionary.json
+snippets.json
+history.json
+shortcuts.json
+llm_providers.json
+miniflow_settings.json
+
+# Secrets
+*.env
+.env*
+
+# Xcode (old Swift remnants)
+*.xcuserdata/
+xcuserdata/
+DerivedData/
+*.xcbuilddata
+*.xcresult
+*.dSYM
+
+# Claude internal docs
+.claude/
+
+# Vercel
+.vercel/
