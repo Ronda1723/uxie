@@ -30,9 +30,13 @@ def _now() -> datetime:
 def _async_db_url(url: str) -> str:
     # Railway provides postgresql:// — asyncpg needs postgresql+asyncpg://
     if url.startswith("postgresql://"):
-        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    if url.startswith("postgres://"):
-        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    elif url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+    # Railway DATABASE_URL uses psycopg2-style sslmode=; asyncpg needs ssl=
+    url = url.replace("sslmode=require", "ssl=require")
+    url = url.replace("sslmode=prefer", "ssl=prefer")
+    url = url.replace("sslmode=disable", "ssl=False")
     return url
 
 
