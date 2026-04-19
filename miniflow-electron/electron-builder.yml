@@ -1,0 +1,43 @@
+appId: ai.smallest.miniflow
+productName: MiniFlow
+copyright: Copyright © 2026 MiniFlow
+directories:
+  buildResources: resources
+  output: dist
+
+files:
+  - build/**/*
+  - package.json
+  - "!**/*.map"
+
+extraResources:
+  # PyInstaller onedir bundle, produced by build_backend.sh
+  - from: ../miniflow-engine/dist/miniflow-engine
+    to: miniflow-engine
+    filter: ["**/*"]
+  # Rust native helper, built with cargo build --release
+  - from: ../native-helper/target/release/miniflow-fn-helper
+    to: miniflow-fn-helper
+  # Tray icons (menu-bar template image, 1x and 2x)
+  - from: resources/iconTemplate.png
+    to: iconTemplate.png
+  - from: resources/iconTemplate@2x.png
+    to: iconTemplate@2x.png
+
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch: [arm64]
+  icon: resources/icon.icns
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: "MiniFlow needs microphone access for voice commands."
+    NSAccessibilityUsageDescription: "MiniFlow types dictated text into the focused app."
+    LSUIElement: true # menu-bar only, no dock icon
+
+dmg:
+  writeUpdateInfo: false
