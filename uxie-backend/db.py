@@ -27,7 +27,16 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-engine = create_async_engine(_settings.database_url, echo=False, pool_pre_ping=True)
+def _async_db_url(url: str) -> str:
+    # Railway provides postgresql:// — asyncpg needs postgresql+asyncpg://
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+    return url
+
+
+engine = create_async_engine(_async_db_url(_settings.database_url), echo=False, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
