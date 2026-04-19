@@ -57,6 +57,7 @@ app.add_api_route("/auth/verify-otp", auth.verify_otp, methods=["POST"])
 # ── LLM + STT proxy ───────────────────────────────────────────────────────────
 
 app.add_api_route("/llm/stream", proxy.llm_stream, methods=["POST"])
+app.add_api_route("/llm/chat", proxy.llm_chat, methods=["POST"])
 app.add_api_route("/stt/session", proxy.stt_session, methods=["POST"])
 
 

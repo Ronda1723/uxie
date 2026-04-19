@@ -98,6 +98,47 @@ async def llm_stream(
 # Implementation: Waves /v1/pulse/get_token exchanges our master key for a
 # short-lived session token. We fetch that and return it to the client.
 
+class LLMChatRequest(BaseModel):
+    messages: list[dict]
+    tools: list[dict] | None = None
+    tool_choice: str | None = None
+    model: str = "gpt-4o"
+    provider: str = "openai"
+    temperature: float = 0.2
+
+
+async def llm_chat(
+    body: LLMChatRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    action = "dictation" if body.provider == "groq" else "command"
+    await check_and_increment(db, user, action)
+
+    base_url, api_key = _llm_base_and_key(body.provider)
+    payload: dict = {
+        "model": body.model,
+        "messages": body.messages,
+        "temperature": body.temperature,
+    }
+    if body.tools:
+        payload["tools"] = body.tools
+        payload["tool_choice"] = body.tool_choice or "auto"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            f"{base_url}/chat/completions",
+            headers=headers,
+            json=payload,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
 class STTSessionResponse(BaseModel):
     token: str
     expires_in: int   # seconds
