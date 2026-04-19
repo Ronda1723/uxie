@@ -27,6 +27,7 @@ CONFIG_DIR = Path.home() / "miniflow"
 KEYS_FILE = CONFIG_DIR / "miniflow_keys.json"
 SETTINGS_FILE = CONFIG_DIR / "miniflow_settings.json"
 LLM_FILE = CONFIG_DIR / "llm_providers.json"
+_UXIE_AUTH_FILE = CONFIG_DIR / "uxie_auth.json"
 
 # Keychain service name — keys are stored as (service, provider) → api_key
 KEYCHAIN_SERVICE = "miniflow-llm"
@@ -48,6 +49,7 @@ DEFAULT_LLM_CONFIG: dict[str, Any] = {
         "groq":      {"model": "llama-3.1-70b-versatile",        "base_url": None},
         "openrouter":{"model": "openrouter/anthropic/claude-3.5-sonnet", "base_url": None},
         "ollama":    {"model": "llama3.1:8b-instruct-q4_K_M",    "base_url": "http://localhost:11434"},
+        "uxie":      {"model": "gpt-4o",                         "base_url": None},
     },
 }
 
@@ -283,6 +285,11 @@ def _get_llm_api_key(provider: str) -> str | None:
     return None
 
 
+def get_llm_api_key(provider: str) -> str | None:
+    """Public accessor for a provider's stored API key."""
+    return _get_llm_api_key(provider)
+
+
 def set_llm_api_key(provider: str, api_key: str):
     """Store a provider's API key. Default: mode-600 JSON file you can edit."""
     api_key = _sanitize_key(api_key)
@@ -332,5 +339,46 @@ def llm_provider_status() -> dict:
 
 
 def _requires_key(provider: str) -> bool:
-    # Ollama doesn't require a key; everything else does.
-    return provider != "ollama"
+    return provider not in ("ollama", "uxie")
+
+
+# ── Uxie backend auth (JWT) ───────────────────────────────────────────────────
+
+def get_uxie_backend_url() -> str:
+    url = os.environ.get("UXIE_BACKEND_URL", "")
+    if not url:
+        url = _read_settings().get("uxie_backend_url", "")
+    if not url:
+        url = "https://uxie-production.up.railway.app"
+    return url.rstrip("/")
+
+
+def get_jwt() -> str | None:
+    return _read_json(_UXIE_AUTH_FILE, {}).get("access_token") or None
+
+
+def save_jwt(
+    token: str,
+    email: str = "",
+    tier: str = "free",
+    referral_code: str = "",
+    free_days_remaining: int = 30,
+):
+    _ensure_dir()
+    data = _read_json(_UXIE_AUTH_FILE, {})
+    data.update({
+        "access_token": token,
+        "email": email,
+        "tier": tier,
+        "referral_code": referral_code,
+        "free_days_remaining": free_days_remaining,
+    })
+    _write_json(_UXIE_AUTH_FILE, data)
+
+
+def clear_jwt():
+    _write_json(_UXIE_AUTH_FILE, {})
+
+
+def get_uxie_user() -> dict:
+    return _read_json(_UXIE_AUTH_FILE, {})

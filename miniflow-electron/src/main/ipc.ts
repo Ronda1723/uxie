@@ -18,6 +18,12 @@ const EXTRA = {
   permGetAll: "perm:getAll",
   permRequest: "perm:request",
   windowPin: "window:pin",
+  // Auth
+  sendOtp: "auth:sendOtp",
+  verifyOtp: "auth:verifyOtp",
+  getUserStatus: "auth:userStatus",
+  getUxieUser: "auth:uxieUser",
+  logout: "auth:logout",
 };
 
 export function registerIpc() {
@@ -110,4 +116,15 @@ export function registerIpc() {
   ipcMain.handle("snip:get",    () => invoke("get_snippets"));
   ipcMain.handle("snip:add",    (_e, trigger: string, expansion: string) => invoke("add_snippet", { trigger, expansion }));
   ipcMain.handle("snip:remove", (_e, trigger: string) => invoke("remove_snippet", { trigger }));
+
+  // Auth (Uxie backend)
+  ipcMain.handle(EXTRA.sendOtp, (_e, email: string, referralCode?: string) =>
+    invoke("send_otp", { email, referral_code: referralCode ?? null })
+  );
+  ipcMain.handle(EXTRA.verifyOtp, (_e, email: string, code: string) =>
+    invoke("verify_otp", { email, code })
+  );
+  ipcMain.handle(EXTRA.getUserStatus, () => invoke("get_user_status", {}));
+  ipcMain.handle(EXTRA.getUxieUser,   () => invoke("get_uxie_user", {}));
+  ipcMain.handle(EXTRA.logout,        () => invoke("logout_uxie", {}));
 }

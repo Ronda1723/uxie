@@ -21,9 +21,12 @@ API keys live in the macOS Keychain (service="miniflow-llm", username=<provider>
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any
+
+import httpx
 
 log = logging.getLogger("llm")
 
@@ -95,11 +98,104 @@ PROVIDERS: dict[str, dict] = {
             "mistral-nemo:12b-instruct-2407-q4_K_M",
         ],
     },
+    "uxie": {
+        "display_name": "Uxie Cloud",
+        "litellm_prefix": "",
+        "requires_key": False,
+        "supports_tools": True,
+        "default_model": "gpt-4o",
+        "suggested_models": ["gpt-4o", "llama-3.1-8b-instant"],
+    },
 }
 
 # Tool-calling in local models is finicky. Keep a known-good allowlist so the UI
 # can warn users when they pick a model that is unlikely to honor tools.
 OLLAMA_TOOL_CAPABLE_FAMILIES = ("llama3.1", "llama3.2", "qwen2.5", "mistral-nemo", "qwen3")
+
+
+# ── Uxie cloud proxy helpers ──────────────────────────────────────────────────
+
+def _uxie_backend_provider(model: str) -> str:
+    """Map model name → groq | openai for the Uxie backend."""
+    groq_families = ("llama", "mixtral", "gemma", "whisper")
+    return "groq" if any(f in model.lower() for f in groq_families) else "openai"
+
+
+async def _uxie_chat_stream(
+    messages: list[dict],
+    model: str,
+    temperature: float,
+    jwt: str,
+):
+    """Stream text chunks from Uxie backend /llm/stream (SSE)."""
+    import config as _config
+    backend_provider = _uxie_backend_provider(model)
+    payload = {
+        "messages": messages,
+        "model": model,
+        "provider": backend_provider,
+        "temperature": temperature,
+        "max_tokens": 1024,
+    }
+    headers = {"Authorization": f"Bearer {jwt}"}
+    base = _config.get_uxie_backend_url()
+    async with httpx.AsyncClient(timeout=60) as client:
+        async with client.stream("POST", f"{base}/llm/stream",
+                                 headers=headers, json=payload) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                data_str = line[6:]
+                if data_str.strip() == "[DONE]":
+                    break
+                try:
+                    data = json.loads(data_str)
+                    piece = (data.get("choices") or [{}])[0].get("delta", {}).get("content") or ""
+                    if piece:
+                        yield piece
+                except Exception:
+                    continue
+
+
+async def _uxie_chat(
+    messages: list[dict],
+    tools: list[dict] | None,
+    model: str,
+    temperature: float,
+    jwt: str,
+) -> "LLMResponse":
+    """Non-streaming chat (with optional tool calling) via Uxie backend /llm/chat."""
+    import config as _config
+    backend_provider = _uxie_backend_provider(model)
+    payload: dict = {
+        "messages": messages,
+        "model": model,
+        "provider": backend_provider,
+        "temperature": temperature,
+    }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+
+    headers = {"Authorization": f"Bearer {jwt}"}
+    base = _config.get_uxie_backend_url()
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(f"{base}/llm/chat", headers=headers, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+
+    msg = (data.get("choices") or [{}])[0].get("message", {})
+    raw_tools = msg.get("tool_calls") or []
+    tool_calls = [
+        ToolCall(
+            id=tc["id"],
+            name=tc["function"]["name"],
+            arguments_json=tc["function"].get("arguments") or "{}",
+        )
+        for tc in raw_tools
+    ]
+    return LLMResponse(content=msg.get("content"), tool_calls=tool_calls)
 
 
 # ── Result type ───────────────────────────────────────────────────────────────
@@ -164,6 +260,15 @@ async def chat_stream(
     begins ~200 ms after the LLM receives the request, rather than waiting
     for the full response.
     """
+    if provider == "uxie":
+        import config as _config
+        jwt = _config.get_jwt()
+        if not jwt:
+            raise ValueError("Not signed in to Uxie — please sign in from Settings")
+        async for chunk in _uxie_chat_stream(messages, model, temperature, jwt):
+            yield chunk
+        return
+
     from litellm import acompletion
     meta = PROVIDERS.get(provider)
     if not meta:
@@ -204,6 +309,13 @@ async def chat(
     Returns a normalized `LLMResponse` so the agent loop code stays identical
     across providers.
     """
+    if provider == "uxie":
+        import config as _config
+        jwt = _config.get_jwt()
+        if not jwt:
+            raise ValueError("Not signed in to Uxie — please sign in from Settings")
+        return await _uxie_chat(messages, tools, model, temperature, jwt)
+
     # Import inside function so the module loads even before litellm is installed
     # (useful when running tests that stub this out).
     from litellm import acompletion

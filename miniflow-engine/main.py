@@ -223,6 +223,58 @@ async def _start_listening(b: dict):
     )
 
 
+async def _send_otp(email: str, referral_code: str | None = None):
+    import httpx
+    base = config.get_uxie_backend_url()
+    payload: dict = {"email": email}
+    if referral_code:
+        payload["referral_code"] = referral_code
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(f"{base}/auth/send-otp", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def _verify_otp(email: str, code: str):
+    import httpx
+    base = config.get_uxie_backend_url()
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(f"{base}/auth/verify-otp", json={"email": email, "code": code})
+        resp.raise_for_status()
+        data = resp.json()
+    config.save_jwt(
+        token=data["access_token"],
+        email=email,
+        tier=data.get("tier", "free"),
+        referral_code=data.get("referral_code", ""),
+        free_days_remaining=data.get("free_days_remaining", 30),
+    )
+    return data
+
+
+async def _get_user_status():
+    import httpx
+    jwt = config.get_jwt()
+    if not jwt:
+        return {"error": "not_logged_in"}
+    base = config.get_uxie_backend_url()
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{base}/user/status",
+            headers={"Authorization": f"Bearer {jwt}"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    config.save_jwt(
+        token=jwt,
+        email=data.get("email", ""),
+        tier=data.get("tier", "free"),
+        referral_code=data.get("referral_code", ""),
+        free_days_remaining=data.get("free_days_remaining", 30),
+    )
+    return data
+
+
 @app.post("/invoke/{command}")
 async def invoke(command: str, body: dict = {}):
     handlers = {
@@ -283,6 +335,12 @@ async def invoke(command: str, body: dict = {}):
         "get_hotkey":            lambda b: hotkey_module.get_hotkey(),
         "set_hotkey":            lambda b: hotkey_module.set_hotkey(b),
         "reset_hotkey":          lambda b: hotkey_module.reset_hotkey(),
+        # Uxie auth
+        "send_otp":              lambda b: _send_otp(b["email"], b.get("referral_code")),
+        "verify_otp":            lambda b: _verify_otp(b["email"], b["code"]),
+        "get_user_status":       lambda b: _get_user_status(),
+        "logout_uxie":           lambda b: config.clear_jwt(),
+        "get_uxie_user":         lambda b: config.get_uxie_user(),
         # App
         "open_settings":         lambda b: None,
     }

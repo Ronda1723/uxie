@@ -19,7 +19,153 @@ const ICONS: Record<PermissionState["id"], string> = {
   inputMonitoring: "⌥",
 };
 
+type OnboardStep = "auth" | "permissions";
+
 export function Onboarding({ onDone }: { onDone: () => void }) {
+  const [step, setStep] = useState<OnboardStep>("auth");
+
+  // Skip auth step if already signed in
+  useEffect(() => {
+    (window.miniflow as any).getUxieUser?.().then((user: any) => {
+      if (user?.access_token) setStep("permissions");
+    }).catch(() => {});
+  }, []);
+
+  if (step === "auth") {
+    return <AuthStep onDone={() => setStep("permissions")} />;
+  }
+  return <PermissionsStep onDone={onDone} />;
+}
+
+// ── Auth step ─────────────────────────────────────────────────────────────────
+
+function AuthStep({ onDone }: { onDone: () => void }) {
+  const [email, setEmail] = useState("");
+  const [code, setCode] = useState("");
+  const [referralCode, setReferralCode] = useState("");
+  const [phase, setPhase] = useState<"email" | "otp">("email");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function sendOtp() {
+    setErr(null);
+    setBusy(true);
+    try {
+      await (window.miniflow as any).sendOtp(email.trim(), referralCode.trim() || undefined);
+      setPhase("otp");
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function verifyOtp() {
+    setErr(null);
+    setBusy(true);
+    try {
+      await (window.miniflow as any).verifyOtp(email.trim(), code.trim());
+      onDone();
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="overlay">
+      <div className="modal onboarding" role="dialog" aria-modal="true">
+        <div className="onboarding-head">
+          <div className="onboarding-title">Welcome to Uxie</div>
+          <div className="onboarding-sub">
+            Sign in with your email — no password needed.
+          </div>
+        </div>
+
+        <div className="stack" style={{ padding: "0 24px" }}>
+          {phase === "email" ? (
+            <>
+              <div className="field">
+                <label htmlFor="ob-email">Email address</label>
+                <input
+                  id="ob-email"
+                  type="email"
+                  placeholder="you@example.com"
+                  value={email}
+                  autoFocus
+                  onChange={(e) => setEmail(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && email.trim()) sendOtp(); }}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="ob-ref">Referral code (optional)</label>
+                <input
+                  id="ob-ref"
+                  type="text"
+                  placeholder="XXXXXXXX"
+                  value={referralCode}
+                  onChange={(e) => setReferralCode(e.target.value.toUpperCase())}
+                />
+              </div>
+            </>
+          ) : (
+            <div className="field">
+              <label htmlFor="ob-otp">6-digit code sent to {email}</label>
+              <input
+                id="ob-otp"
+                type="text"
+                placeholder="123456"
+                value={code}
+                maxLength={6}
+                autoFocus
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+                onKeyDown={(e) => { if (e.key === "Enter" && code.length === 6) verifyOtp(); }}
+              />
+              <div className="hint">
+                Check your inbox. The code expires in 10 minutes.{" "}
+                <button
+                  className="btn-link"
+                  onClick={() => { setPhase("email"); setCode(""); setErr(null); }}
+                  style={{ background: "none", border: "none", color: "var(--accent)", cursor: "pointer", padding: 0, fontSize: "inherit" }}
+                >
+                  Change email
+                </button>
+              </div>
+            </div>
+          )}
+
+          {err && <div className="error-msg">{err}</div>}
+        </div>
+
+        <div className="onboarding-foot">
+          {phase === "email" ? (
+            <button
+              className="btn-primary"
+              onClick={sendOtp}
+              disabled={!email.trim() || busy}
+            >
+              {busy ? "Sending…" : "Send code"}
+            </button>
+          ) : (
+            <button
+              className="btn-primary"
+              onClick={verifyOtp}
+              disabled={code.length !== 6 || busy}
+            >
+              {busy ? "Verifying…" : "Sign in"}
+            </button>
+          )}
+          <button className="btn-secondary" onClick={onDone}>Skip for now</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Permissions step ──────────────────────────────────────────────────────────
+
+function PermissionsStep({ onDone }: { onDone: () => void }) {
   const [perms, setPerms] = useState<PermissionState[] | null>(null);
   const [busy, setBusy] = useState<PermissionState["id"] | null>(null);
 
@@ -30,8 +176,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
 
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, 2000);  // poll so Input Monitoring toggles show up live
-    // Pin the popover so it doesn't auto-hide when the macOS permission prompt steals focus.
+    const t = setInterval(refresh, 2000);
     (window.miniflow as any).pinWindow?.(true);
     return () => {
       clearInterval(t);
@@ -48,21 +193,20 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   if (!perms) return null;
 
   const allGranted = perms.every((p) => p.status === "granted");
-  const required = perms;  // all three are required
 
   return (
     <div className="overlay">
       <div className="modal onboarding" role="dialog" aria-modal="true">
         <div className="onboarding-head">
-          <div className="onboarding-title">Welcome to MiniFlow</div>
+          <div className="onboarding-title">Grant permissions</div>
           <div className="onboarding-sub">
-            MiniFlow needs three macOS permissions to work. Grant them here — no need
+            Uxie needs three macOS permissions to work. Grant them here — no need
             to dig through System Settings.
           </div>
         </div>
 
         <div className="onboarding-list">
-          {required.map((p) => (
+          {perms.map((p) => (
             <PermRow key={p.id} perm={p} busy={busy === p.id}
                      onGrant={() => request(p.id)} />
           ))}

@@ -387,23 +387,21 @@ async def correct_grammar(text: str) -> str:
     text = (text or "").strip()
     if not text:
         return text
-    try:
-        active = config.get_active_llm()
-    except ValueError:
+    jwt = config.get_jwt()
+    api_key = config.get_llm_api_key("groq")
+    if not jwt and not api_key:
         return text
-    if active.get("api_key") is None and active["provider"] != "ollama":
-        return text
+    provider = "uxie" if jwt else "groq"
     try:
         response = await llm_module.chat(
-            provider=active["provider"],
-            model=active["model"],
+            provider=provider,
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": GRAMMAR_PROMPT},
                 {"role": "user", "content": text},
             ],
-            tools=None,  # no tools — strictly grammar correction
-            api_key=active.get("api_key"),
-            base_url=active.get("base_url"),
+            tools=None,
+            api_key=api_key if provider == "groq" else None,
             temperature=0.0,
         )
         cleaned = (response.content or "").strip()
@@ -448,28 +446,23 @@ async def dictate_streaming(text: str, emit) -> str:
     if not text:
         return text
 
-    try:
-        active = config.get_active_llm()
-    except ValueError:
-        # No LLM configured — type the raw transcript as-is.
+    jwt = config.get_jwt()
+    api_key = config.get_llm_api_key("groq")
+    if not jwt and not api_key:
         await emit("action-result", {"action": "dictation", "success": True, "message": text})
         return text
 
-    if active.get("api_key") is None and active["provider"] != "ollama":
-        await emit("action-result", {"action": "dictation", "success": True, "message": text})
-        return text
-
+    provider = "uxie" if jwt else "groq"
     full = ""
     try:
         async for piece in llm_module.chat_stream(
-            provider=active["provider"],
-            model=active["model"],
+            provider=provider,
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": GRAMMAR_PROMPT},
                 {"role": "user", "content": text},
             ],
-            api_key=active.get("api_key"),
-            base_url=active.get("base_url"),
+            api_key=api_key if provider == "groq" else None,
             temperature=0.0,
         ):
             if not piece:
@@ -496,19 +489,16 @@ async def dictate_streaming(text: str, emit) -> str:
 async def execute_command(text: str) -> list[dict]:
     await _emit("agent-status", "processing")
 
-    # Resolve the active LLM. If not configured (no key for a provider that
-    # needs one), fall through to raw dictation so the user still gets typing.
-    try:
-        active = config.get_active_llm()
-        if active.get("api_key") is None and active["provider"] != "ollama":
-            raise ValueError(f"No API key set for provider: {active['provider']}")
-    except ValueError as e:
-        log.info(f"No active LLM ({e}); emitting dictation for '{text[:60]}'")
+    jwt = config.get_jwt()
+    openai_key = config.get_llm_api_key("openai")
+    if not jwt and not openai_key:
+        log.info("No OpenAI key or Uxie JWT; emitting raw dictation for command")
         result = [{"action": "dictation", "success": True, "message": text}]
         await _emit("action-result", {"action": "dictation", "success": True, "message": text})
         history.append_entry(transcript=text, entry_type="dictation", actions=result, success=True)
         await _emit("agent-status", "idle")
         return result
+    cmd_provider = "uxie" if jwt else "openai"
 
     user_name = config.get_user_name()
     today = datetime.now().strftime("%A, %B %d, %Y")
@@ -535,12 +525,11 @@ async def execute_command(text: str) -> list[dict]:
     for _ in range(max_turns):
         try:
             response = await llm_module.chat(
-                provider=active["provider"],
-                model=active["model"],
+                provider=cmd_provider,
+                model="gpt-4o",
                 messages=messages,
                 tools=tools,
-                api_key=active.get("api_key"),
-                base_url=active.get("base_url"),
+                api_key=openai_key if cmd_provider == "openai" else None,
                 temperature=0.0,
             )
         except Exception as e:

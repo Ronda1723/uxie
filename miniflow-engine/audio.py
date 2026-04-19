@@ -57,6 +57,27 @@ async def _emit(event: str, payload):
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+async def _fetch_stt_token() -> str | None:
+    """Fetch a short-lived Waves session token from the Uxie backend.
+    Returns None if no JWT is stored (user not signed in)."""
+    jwt = config.get_jwt()
+    if not jwt:
+        return None
+    try:
+        import httpx
+        base = config.get_uxie_backend_url()
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{base}/stt/session",
+                headers={"Authorization": f"Bearer {jwt}"},
+            )
+            resp.raise_for_status()
+            return resp.json().get("token")
+    except Exception as e:
+        log.warning(f"Failed to fetch STT session token from Uxie backend: {e}")
+        return None
+
+
 async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
     global _waves_ws, _sample_rate, _final_fragments, _session_active, _session_mode
     global _last_seen_received, _receive_task
@@ -67,11 +88,14 @@ async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
     _last_seen_received = asyncio.Event()
     log.info(f"Starting listening session: mode={_session_mode}")
 
-    try:
-        key = config.get_smallest_key()
-    except ValueError as e:
-        await _emit("transcription-error", str(e))
-        return
+    # Try Uxie backend token first; fall back to locally-stored master key
+    key = await _fetch_stt_token()
+    if not key:
+        try:
+            key = config.get_smallest_key()
+        except ValueError as e:
+            await _emit("transcription-error", str(e))
+            return
 
     url = (
         f"wss://api.smallest.ai/waves/v1/pulse/get_text"
@@ -115,25 +139,34 @@ async def stop_listening():
     except Exception as e:
         log.warning(f"Could not send finalize: {e}")
 
-    # Wait up to 400ms for Waves' is_last. Most finals arrive in 100–250ms,
-    # so a shorter cap hides no real data and keeps perceived latency snappy.
+    # Wait up to 150ms for Waves' is_last. Most finals arrive in 50–120ms
+    # after finalize; cutting from 400ms saves ~250ms of dead time before
+    # the LLM call starts.
     try:
         assert _last_seen_received is not None
-        await asyncio.wait_for(_last_seen_received.wait(), timeout=0.4)
+        await asyncio.wait_for(_last_seen_received.wait(), timeout=0.15)
     except asyncio.TimeoutError:
-        log.warning("Timed out waiting for is_last (400ms); proceeding with what we have")
+        log.warning("Timed out waiting for is_last (150ms); proceeding with what we have")
 
-    # Close the socket + kill the receive task
-    try: await _waves_ws.close()
-    except Exception: pass
-    if _receive_task:
-        try: await asyncio.wait_for(_receive_task, timeout=0.5)
-        except Exception: pass
-        _receive_task = None
+    # Snapshot the transcript NOW so we can start the LLM immediately.
+    raw_text = _consolidate_fragments(_final_fragments)
+
+    # Close socket + cancel receive task in the background — don't block LLM start.
+    ws_to_close = _waves_ws
+    task_to_cancel = _receive_task
     _waves_ws = None
+    _receive_task = None
     _session_active = False
 
-    raw_text = _consolidate_fragments(_final_fragments)
+    async def _cleanup():
+        try:
+            if ws_to_close:
+                await ws_to_close.close()
+        except Exception:
+            pass
+        if task_to_cancel:
+            task_to_cancel.cancel()
+    asyncio.create_task(_cleanup())
     log.info(f"Waves final raw ({len(_final_fragments)} fragments): '{raw_text[:120]}'")
 
     # Apply user dictionary (word substitutions) + snippets (trigger → expansion)

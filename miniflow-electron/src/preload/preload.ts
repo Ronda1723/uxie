@@ -31,6 +31,12 @@ const CH = {
   windowPin: "window:pin",
   openExternal: "app:openExternal",
   quit: "app:quit",
+  // Auth
+  sendOtp: "auth:sendOtp",
+  verifyOtp: "auth:verifyOtp",
+  getUserStatus: "auth:userStatus",
+  getUxieUser: "auth:uxieUser",
+  logout: "auth:logout",
 } as const;
 
 function listen<T>(channel: string, cb: (value: T) => void) {
@@ -89,6 +95,15 @@ const api = {
   // History
   getHistory:     () => ipcRenderer.invoke(CH.getHistory),
   clearHistory:   () => ipcRenderer.invoke(CH.clearHistory),
+
+  // Auth (Uxie backend)
+  sendOtp:        (email: string, referralCode?: string) =>
+    ipcRenderer.invoke(CH.sendOtp, email, referralCode),
+  verifyOtp:      (email: string, code: string) =>
+    ipcRenderer.invoke(CH.verifyOtp, email, code),
+  getUserStatus:  () => ipcRenderer.invoke(CH.getUserStatus),
+  getUxieUser:    () => ipcRenderer.invoke(CH.getUxieUser),
+  logout:         () => ipcRenderer.invoke(CH.logout),
 
   // App
   openExternal:   (url: string) => ipcRenderer.invoke(CH.openExternal, url),
