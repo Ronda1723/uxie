@@ -28,6 +28,11 @@ from db import User, get_db, init_db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import os, re
+    raw = os.environ.get("DATABASE_URL", "")
+    # mask password for logging
+    masked = re.sub(r"://([^:]+):([^@]+)@", r"://\1:***@", raw)
+    print(f"[startup] DATABASE_URL = {masked!r}", flush=True)
     await init_db()
     yield
 
