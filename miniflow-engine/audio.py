@@ -43,6 +43,7 @@ _session_mode: str = "dictation"
 _final_fragments: list[str] = []  # accumulates per-utterance finals from Waves
 _last_seen_received: asyncio.Event | None = None
 _receive_task: asyncio.Task | None = None
+_cached_waves_token: str | None = None  # cached for the app session lifetime
 
 
 def set_event_broadcaster(fn: Callable):
@@ -58,8 +59,10 @@ async def _emit(event: str, payload):
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def _fetch_stt_token() -> str | None:
-    """Fetch a short-lived Waves session token from the Uxie backend.
-    Returns None if no JWT is stored (user not signed in)."""
+    """Return cached Waves token, fetching from Uxie backend only on first call."""
+    global _cached_waves_token
+    if _cached_waves_token:
+        return _cached_waves_token
     jwt = config.get_jwt()
     if not jwt:
         return None
@@ -72,7 +75,10 @@ async def _fetch_stt_token() -> str | None:
                 headers={"Authorization": f"Bearer {jwt}"},
             )
             resp.raise_for_status()
-            return resp.json().get("token")
+            token = resp.json().get("token")
+            if token:
+                _cached_waves_token = token
+            return token
     except Exception as e:
         log.warning(f"Failed to fetch STT session token from Uxie backend: {e}")
         return None
@@ -139,14 +145,12 @@ async def stop_listening():
     except Exception as e:
         log.warning(f"Could not send finalize: {e}")
 
-    # Wait up to 150ms for Waves' is_last. Most finals arrive in 50–120ms
-    # after finalize; cutting from 400ms saves ~250ms of dead time before
-    # the LLM call starts.
+    # Wait up to 800ms for Waves' is_last before proceeding.
     try:
         assert _last_seen_received is not None
-        await asyncio.wait_for(_last_seen_received.wait(), timeout=0.15)
+        await asyncio.wait_for(_last_seen_received.wait(), timeout=0.8)
     except asyncio.TimeoutError:
-        log.warning("Timed out waiting for is_last (150ms); proceeding with what we have")
+        log.warning("Timed out waiting for is_last (800ms); proceeding with what we have")
 
     # Snapshot the transcript NOW so we can start the LLM immediately.
     raw_text = _consolidate_fragments(_final_fragments)
