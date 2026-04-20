@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { HotkeySettings } from "./HotkeyRecorder";
 
-type SettingsTab = "account" | "speech" | "hotkey";
+type SettingsTab = "account" | "hotkey";
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<SettingsTab>("account");
@@ -12,13 +12,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         <div className="modal-header">
           <span className="modal-title">Settings</span>
           <button className={`modal-tab ${tab === "account" ? "active" : ""}`} onClick={() => setTab("account")}>Account</button>
-          <button className={`modal-tab ${tab === "speech"  ? "active" : ""}`} onClick={() => setTab("speech")}>Speech</button>
           <button className={`modal-tab ${tab === "hotkey"  ? "active" : ""}`} onClick={() => setTab("hotkey")}>Hotkey</button>
           <button className="modal-close" onClick={onClose} aria-label="Close">✕</button>
         </div>
         <div className="modal-body">
           {tab === "account" && <AccountTab />}
-          {tab === "speech"  && <SpeechTab />}
           {tab === "hotkey"  && <HotkeySettings />}
         </div>
       </div>
@@ -233,46 +231,3 @@ function LoginPanel({ onDone }: { onDone: () => void }) {
   );
 }
 
-// ── Speech tab ────────────────────────────────────────────────────────────────
-
-function SpeechTab() {
-  const [key, setKey] = useState("");
-  const [saved, setSaved] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  async function save() {
-    setErr(null);
-    try {
-      await (window.miniflow as any).saveSmallestKey(key.trim());
-      setSaved(true); setKey("");
-      setTimeout(() => setSaved(false), 2000);
-    } catch (e: any) {
-      setErr(e?.message ?? String(e));
-    }
-  }
-
-  return (
-    <div className="stack">
-      <div style={{ fontSize: 13, color: "var(--text-muted)" }}>
-        When signed in to Uxie, speech-to-text is handled automatically.
-        Enter your own Smallest AI key here to use it instead.
-      </div>
-      <div className="field">
-        <label htmlFor="smallest">Smallest AI (Waves) API key</label>
-        <input id="smallest" type="password" placeholder="waves_..." value={key}
-               onChange={(e) => setKey(e.target.value)}
-               onKeyDown={(e) => { if (e.key === "Enter") save(); }} />
-        <div className="hint">
-          Get one at <code>waves.smallest.ai</code> → Dashboard.
-        </div>
-      </div>
-      <div className="row">
-        <button className="btn-primary" onClick={save} disabled={!key.trim()}>
-          {saved ? "✓ Saved" : "Save"}
-        </button>
-        {saved && <span style={{ color: "var(--success-green)", fontSize: 11 }}>Key stored.</span>}
-      </div>
-      {err && <div className="error-msg">{err}</div>}
-    </div>
-  );
-}
