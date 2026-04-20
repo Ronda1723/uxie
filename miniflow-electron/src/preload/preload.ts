@@ -91,6 +91,8 @@ const api = {
   onAgentStatus:  (cb: (s: string) => void) => listen<string>(CH.agentStatus, cb),
   onDictationChunk: (cb: (chunk: string) => void) =>
     listen<{ chunk?: string }>("agent:chunk", (p) => cb(p?.chunk ?? "")),
+  onDebugEvent: (cb: (e: { type: string; text: string; app: string; success?: boolean }) => void) =>
+    listen("debug:event", cb),
 
   // History
   getHistory:     () => ipcRenderer.invoke(CH.getHistory),

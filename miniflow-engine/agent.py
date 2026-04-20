@@ -478,6 +478,12 @@ async def dictate_streaming(text: str, emit) -> str:
     if len(cleaned) >= 2 and cleaned[0] in "\"'" and cleaned[-1] == cleaned[0]:
         cleaned = cleaned[1:-1]
 
+    await emit("debug", {
+        "type": "llm",
+        "text": cleaned,
+        "app": _target_bundle_id or "unknown",
+    })
+
     # Emit final marker (UI uses this to update the "Last transcript" card and
     # to dedupe if any chunks got dropped mid-stream).
     await emit("action-result", {"action": "dictation-final", "success": True, "message": cleaned})
@@ -539,9 +545,13 @@ async def execute_command(text: str) -> list[dict]:
             break
 
         if not response.tool_calls:
-            # No tool call -> emit dictation action; the shell performs typing.
-            # We NEVER type the model's text response, only the original transcript.
             log.info(f"Emitting dictation action: '{text[:60]}'")
+            await _emit("debug", {
+                "type": "inject",
+                "text": text,
+                "app": _target_bundle_id or "unknown",
+                "success": True,
+            })
             await _emit("action-result", {"action": "dictation", "success": True, "message": text})
             action_results.append({"action": "dictation", "success": True, "message": text})
             break

@@ -55,6 +55,7 @@ function forwardToRenderer(event: string, payload: unknown): void {
     event === "transcription"       ? "voice:transcription" :
     event === "transcription-error" ? "voice:transcription-error" :
     event === "oauth-connected"     ? "oauth:connected" :
+    event === "debug"               ? "debug:event" :
     null;
   if (!channel) return;
   // Broadcast to every live BrowserWindow exactly ONCE. We used to also loop

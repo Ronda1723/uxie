@@ -172,6 +172,12 @@ async def stop_listening():
             task_to_cancel.cancel()
     asyncio.create_task(_cleanup())
     log.info(f"Waves final raw ({len(_final_fragments)} fragments): '{raw_text[:120]}'")
+    import agent as _agent
+    await _emit("debug", {
+        "type": "stt",
+        "text": raw_text or "(empty)",
+        "app": _agent._target_bundle_id or "unknown",
+    })
 
     # Apply user dictionary (word substitutions) + snippets (trigger → expansion)
     # BEFORE the LLM pass so streaming grammar correction works on the already-
