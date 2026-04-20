@@ -9,28 +9,31 @@ import { useAudioCapture } from "./audio";
 
 export type SidebarTab = "home" | "dictionary" | "snippets";
 
-const ONBOARDING_DISMISSED_KEY = "miniflow.onboarded";
-
 export function App() {
   const [tab, setTab] = useState<SidebarTab>("home");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState<boolean | null>(null); // null = loading
   const [agentStatus, setAgentStatus] = useState<string>("idle");
   const [userName] = useState<string>("");
   const { capturing, mode: captureMode } = useAudioCapture();
   const isListening = capturing;
   const isProcessing = agentStatus === "processing";
 
-  // Decide whether to show onboarding on mount: show if any permission is not
-  // granted AND the user hasn't already dismissed it.
+  // Show onboarding if not signed in OR if permissions are missing.
   useEffect(() => {
     (async () => {
-      const dismissed = localStorage.getItem(ONBOARDING_DISMISSED_KEY) === "1";
       try {
+        const user = await (window.miniflow as any).getUxieUser();
+        if (!user?.access_token) {
+          setShowOnboarding(true);
+          return;
+        }
         const perms = (await (window.miniflow as any).getPermissions()) as { status: string }[];
         const anyMissing = perms.some((p) => p.status !== "granted");
-        if (anyMissing && !dismissed) setShowOnboarding(true);
-      } catch { /* ignore */ }
+        setShowOnboarding(anyMissing);
+      } catch {
+        setShowOnboarding(true);
+      }
     })();
   }, []);
 
@@ -45,8 +48,14 @@ export function App() {
   }, []);
 
   function closeOnboarding() {
-    localStorage.setItem(ONBOARDING_DISMISSED_KEY, "1");
     setShowOnboarding(false);
+  }
+
+  // Don't render anything until we know auth state
+  if (showOnboarding === null) return null;
+
+  if (showOnboarding) {
+    return <Onboarding onDone={closeOnboarding} />;
   }
 
   return (
@@ -72,7 +81,6 @@ export function App() {
         </div>
       </div>
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
-      {showOnboarding && <Onboarding onDone={closeOnboarding} />}
     </div>
   );
 }

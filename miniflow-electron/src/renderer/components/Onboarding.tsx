@@ -24,13 +24,6 @@ type OnboardStep = "auth" | "permissions";
 export function Onboarding({ onDone }: { onDone: () => void }) {
   const [step, setStep] = useState<OnboardStep>("auth");
 
-  // Skip auth step if already signed in
-  useEffect(() => {
-    (window.miniflow as any).getUxieUser?.().then((user: any) => {
-      if (user?.access_token) setStep("permissions");
-    }).catch(() => {});
-  }, []);
-
   if (step === "auth") {
     return <AuthStep onDone={() => setStep("permissions")} />;
   }
@@ -156,7 +149,6 @@ function AuthStep({ onDone }: { onDone: () => void }) {
               {busy ? "Verifying…" : "Sign in"}
             </button>
           )}
-          <button className="btn-secondary" onClick={onDone}>Skip for now</button>
         </div>
       </div>
     </div>
