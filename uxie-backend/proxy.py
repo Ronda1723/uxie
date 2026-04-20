@@ -152,21 +152,7 @@ async def stt_session(
     if not _settings.waves_api_key:
         raise HTTPException(500, "Waves API key not configured on server")
 
-    # Exchange our master key for a short-lived session token
-    url = "https://api.smallest.ai/waves/v1/pulse/get_token"
-    ttl = _settings.waves_session_ttl_seconds
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(
-            url,
-            headers={"Authorization": f"Bearer {_settings.waves_api_key}"},
-            json={"ttl": ttl},
-        )
-        if resp.status_code != 200:
-            raise HTTPException(502, f"Waves token fetch failed: {resp.text}")
-        data = resp.json()
-
-    session_token = data.get("token") or data.get("access_token")
-    if not session_token:
-        raise HTTPException(502, "Waves returned no token")
-
-    return STTSessionResponse(token=session_token, expires_in=ttl)
+    return STTSessionResponse(
+        token=_settings.waves_api_key,
+        expires_in=_settings.waves_session_ttl_seconds,
+    )
