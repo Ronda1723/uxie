@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     pro_command_limit: int = 500
     trial_days: int = 30              # new users get 30 free days (full Pro)
 
+    # Comma-separated list of emails allowed to view /admin/* pages.
+    admin_emails: str = ""
+
+    def admin_email_set(self) -> set[str]:
+        return {e.strip().lower() for e in self.admin_emails.split(",") if e.strip()}
+
 
 @lru_cache
 def get_settings() -> Settings:

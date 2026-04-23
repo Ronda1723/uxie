@@ -22,6 +22,7 @@ from auth import current_user
 from db import User, get_db
 from limits import check_and_increment
 from settings import get_settings
+import usage
 
 _settings = get_settings()
 _log = logging.getLogger("proxy")
@@ -78,7 +79,16 @@ def _llm_base_and_key(provider: str) -> tuple[str, str]:
     raise HTTPException(400, f"Unknown provider: {provider}")
 
 
-async def _stream_chunks(base_url: str, api_key: str, payload: dict) -> AsyncIterator[bytes]:
+async def _stream_chunks(
+    base_url: str,
+    api_key: str,
+    payload: dict,
+    *,
+    on_usage: "callable | None" = None,
+) -> AsyncIterator[bytes]:
+    """Proxy SSE from provider -> client, and on the way through, extract the
+    final `usage` chunk (prompt_tokens, completion_tokens) for billing."""
+    import json as _json
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -88,8 +98,21 @@ async def _stream_chunks(base_url: str, api_key: str, payload: dict) -> AsyncIte
                              headers=headers, json=payload) as resp:
         resp.raise_for_status()
         async for line in resp.aiter_lines():
-            if line:
-                yield (line + "\n\n").encode()
+            if not line:
+                continue
+            # OpenAI/Groq emit `data: {...}` lines; the final usage chunk
+            # lives on a chunk whose choices array is empty and `usage` is set.
+            if on_usage and line.startswith("data: "):
+                body = line[6:].strip()
+                if body and body != "[DONE]":
+                    try:
+                        obj = _json.loads(body)
+                        u = obj.get("usage")
+                        if isinstance(u, dict):
+                            on_usage(u)
+                    except Exception:
+                        pass
+            yield (line + "\n\n").encode()
 
 
 async def llm_stream(
@@ -107,12 +130,40 @@ async def llm_stream(
         "temperature": body.temperature,
         "max_tokens": body.max_tokens,
         "stream": True,
+        # Opt in to usage accounting on the final chunk; both OpenAI and Groq
+        # respect this. Without it, `usage` comes back null.
+        "stream_options": {"include_usage": True},
     }
 
-    return StreamingResponse(
-        _stream_chunks(base_url, api_key, payload),
-        media_type="text/event-stream",
-    )
+    # Captured by the stream generator and persisted after the response body
+    # is fully sent. Scoped dict avoids needing a closure ref.
+    captured: dict = {"prompt_tokens": 0, "completion_tokens": 0, "started_at": 0.0}
+
+    import time as _time
+    captured["started_at"] = _time.perf_counter()
+
+    def _on_usage(u: dict) -> None:
+        captured["prompt_tokens"] = int(u.get("prompt_tokens", 0) or 0)
+        captured["completion_tokens"] = int(u.get("completion_tokens", 0) or 0)
+
+    async def _wrap():
+        try:
+            async for chunk in _stream_chunks(base_url, api_key, payload, on_usage=_on_usage):
+                yield chunk
+        finally:
+            duration_ms = int((_time.perf_counter() - captured["started_at"]) * 1000)
+            await usage.record_llm_usage(
+                db,
+                user_id=user.id,
+                provider=body.provider,
+                model=body.model,
+                action=action,
+                prompt_tokens=captured["prompt_tokens"],
+                completion_tokens=captured["completion_tokens"],
+                duration_ms=duration_ms,
+            )
+
+    return StreamingResponse(_wrap(), media_type="text/event-stream")
 
 
 # ── LLM non-streaming (tool calling / commands) ───────────────────────────────
@@ -131,6 +182,7 @@ async def llm_chat(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(current_user),
 ):
+    import time as _time
     await check_and_increment(db, user, "command")
     base_url, api_key = _llm_base_and_key(body.provider)
     payload: dict = {
@@ -143,13 +195,28 @@ async def llm_chat(
         payload["tool_choice"] = body.tool_choice or "auto"
 
     client = get_http()
+    t0 = _time.perf_counter()
     resp = await client.post(
         f"{base_url}/chat/completions",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json=payload,
     )
     resp.raise_for_status()
-    return resp.json()
+    data = resp.json()
+    duration_ms = int((_time.perf_counter() - t0) * 1000)
+
+    u = data.get("usage") or {}
+    await usage.record_llm_usage(
+        db,
+        user_id=user.id,
+        provider=body.provider,
+        model=body.model,
+        action="command",
+        prompt_tokens=int(u.get("prompt_tokens", 0) or 0),
+        completion_tokens=int(u.get("completion_tokens", 0) or 0),
+        duration_ms=duration_ms,
+    )
+    return data
 
 
 # ── STT session token ─────────────────────────────────────────────────────────
@@ -162,11 +229,12 @@ class STTSessionResponse(BaseModel):
     sample_rate: int = 16000
 
 
-async def _mint_deepgram_key(user_id: int) -> str | None:
+async def _mint_deepgram_key(user_id: int) -> tuple[str | None, str | None]:
+    """Returns (key, api_key_id). key is None on failure."""
     master = (_settings.deepgram_api_key or "").strip()
     project_id = (_settings.deepgram_project_id or "").strip()
     if not master or not project_id:
-        return None
+        return None, None
     try:
         client = get_http()
         resp = await client.post(
@@ -183,22 +251,24 @@ async def _mint_deepgram_key(user_id: int) -> str | None:
             },
         )
         if resp.status_code in (200, 201):
-            return resp.json().get("key")
+            j = resp.json()
+            return j.get("key"), j.get("api_key_id")
         _log.warning(
             "Deepgram key mint failed: %s %s", resp.status_code, resp.text[:200]
         )
-        return None
+        return None, None
     except Exception as e:
         _log.warning("Deepgram key mint exception: %s", e)
-        return None
+        return None, None
 
 
 async def stt_session(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(current_user),
 ) -> STTSessionResponse:
-    ephemeral = await _mint_deepgram_key(user.id)
+    ephemeral, key_id = await _mint_deepgram_key(user.id)
     if ephemeral:
+        await usage.record_stt_usage(db, user_id=user.id, deepgram_key_id=key_id)
         return STTSessionResponse(
             token=ephemeral,
             expires_in=_settings.deepgram_session_ttl_seconds,
@@ -211,4 +281,5 @@ async def stt_session(
         "Returning master Deepgram key to user %s — set DEEPGRAM_PROJECT_ID to enable ephemeral keys",
         user.id,
     )
+    await usage.record_stt_usage(db, user_id=user.id, deepgram_key_id=None)
     return STTSessionResponse(token=master, expires_in=3600)

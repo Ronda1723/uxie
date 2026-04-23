@@ -95,6 +95,37 @@ class Referral(Base):
     redeemed_at = Column(DateTime(timezone=True), nullable=True)
 
 
+# ── Usage telemetry (for admin dashboard + cost attribution) ──────────────────
+
+from sqlalchemy import Float
+
+
+class LLMUsage(Base):
+    __tablename__ = "llm_usage"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider = Column(String, nullable=False)          # "groq" | "openai"
+    model = Column(String, nullable=False)             # e.g. "gpt-4o", "llama-3.1-8b-instant"
+    action = Column(String, nullable=False)            # "dictation" | "command"
+    prompt_tokens = Column(Integer, nullable=False, default=0)
+    completion_tokens = Column(Integer, nullable=False, default=0)
+    cost_usd_est = Column(Float, nullable=False, default=0.0)
+    duration_ms = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now, index=True)
+
+
+class STTUsage(Base):
+    __tablename__ = "stt_usage"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider = Column(String, nullable=False, default="deepgram")
+    deepgram_key_id = Column(String, nullable=True)    # Deepgram's api_key_id — reconcile later with their Usage API
+    cost_usd_est = Column(Float, nullable=False, default=0.0)  # MVP estimate; reconcile later
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now, index=True)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def generate_referral_code(length: int = 8) -> str:

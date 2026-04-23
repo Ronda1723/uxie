@@ -21,6 +21,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import admin
 import auth
 import limits
 import proxy
@@ -94,6 +95,14 @@ app.add_api_route("/stt/session", proxy.stt_session, methods=["POST"])
 
 app.add_api_route("/referral/redeem", referral.redeem_referral, methods=["POST"])
 app.add_api_route("/referral/stats", referral.get_referral_stats, methods=["GET"])
+
+
+# ── Admin dashboard ───────────────────────────────────────────────────────────
+
+app.add_api_route("/admin/dashboard",    admin.dashboard_html, methods=["GET"], response_class=__import__("fastapi").responses.HTMLResponse)
+app.add_api_route("/admin/stats.json",   admin.stats_json,     methods=["GET"])
+app.add_api_route("/admin/users.json",   admin.users_json,     methods=["GET"])
+app.add_api_route("/admin/user/{user_id}.json", admin.user_detail_json, methods=["GET"])
 
 
 # ── User status ───────────────────────────────────────────────────────────────
