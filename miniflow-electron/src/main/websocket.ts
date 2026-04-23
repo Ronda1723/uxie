@@ -57,8 +57,9 @@ function forwardToRenderer(event: string, payload: unknown): void {
     event === "agent-status"        ? IpcChannels.agentStatus :
     event === "action-result"       ? IpcChannels.actionResult :
     event === "action-chunk"        ? "agent:chunk" :
-    event === "transcription"       ? "voice:transcription" :
-    event === "transcription-error" ? "voice:transcription-error" :
+    event === "transcription"         ? "voice:transcription" :
+    event === "transcription-interim" ? "voice:transcription-interim" :
+    event === "transcription-error"   ? "voice:transcription-error" :
     event === "oauth-connected"     ? "oauth:connected" :
     event === "debug"               ? "debug:event" :
     event === "approval-needed"     ? "agent:approval-needed" :

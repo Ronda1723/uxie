@@ -20,6 +20,7 @@ const CH = {
   stopCapture: "voice:stop",
   audioChunk: "voice:chunk",
   transcription: "voice:transcription",
+  transcriptionInterim: "voice:transcription-interim",
   transcriptionError: "voice:transcription-error",
   actionResult: "agent:action",
   agentStatus: "agent:status",
@@ -64,6 +65,8 @@ const api = {
   // Transcription events
   onTranscription: (cb: (p: { transcript: string; is_final: boolean; is_session?: boolean }) => void) =>
     listen(CH.transcription, cb),
+  onTranscriptionInterim: (cb: (p: { transcript: string }) => void) =>
+    listen(CH.transcriptionInterim, cb),
   onTranscriptionError: (cb: (err: string) => void) =>
     listen<string>(CH.transcriptionError, cb),
 

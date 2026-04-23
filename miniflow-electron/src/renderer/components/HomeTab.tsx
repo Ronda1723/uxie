@@ -21,6 +21,7 @@ interface HistoryEntry {
 export function HomeTab({ userName, isListening, isProcessing, captureMode = "dictation" }: Props) {
   const [commandText, setCommandText] = useState("");
   const [lastTranscript, setLastTranscript] = useState<string>("");
+  const [interim, setInterim] = useState<string>("");
   const [rawStt, setRawStt] = useState<string>("");
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -35,6 +36,12 @@ export function HomeTab({ userName, isListening, isProcessing, captureMode = "di
 
   useEffect(() => { refreshHistory(); }, []);
 
+  // Reset the live interim preview whenever we stop listening, so stale
+  // partials don't linger until the next session starts.
+  useEffect(() => {
+    if (!isListening) setInterim("");
+  }, [isListening]);
+
   useEffect(() => {
     let streaming = "";
     const offChunk = (window.miniflow as any).onDictationChunk?.((chunk: string) => {
@@ -45,8 +52,14 @@ export function HomeTab({ userName, isListening, isProcessing, captureMode = "di
       (p: { transcript: string; is_final: boolean; is_session?: boolean }) => {
         if (!p?.transcript || !p.is_session) return;
         setLastTranscript(p.transcript);
+        setInterim("");        // final transcript arrived; clear partial
         streaming = "";
         setTimeout(refreshHistory, 1500);
+      }
+    );
+    const offInterim = (window.miniflow as any).onTranscriptionInterim?.(
+      (p: { transcript: string }) => {
+        if (p?.transcript) setInterim(p.transcript);
       }
     );
     const offErr = (window.miniflow as any).onTranscriptionError?.(
@@ -65,7 +78,7 @@ export function HomeTab({ userName, isListening, isProcessing, captureMode = "di
         setRawStt(e.text);
       }
     });
-    return () => { offChunk?.(); offTx?.(); offErr?.(); offAct?.(); offDbg?.(); };
+    return () => { offChunk?.(); offTx?.(); offInterim?.(); offErr?.(); offAct?.(); offDbg?.(); };
   }, []);
 
   async function sendCommand() {
@@ -107,6 +120,14 @@ export function HomeTab({ userName, isListening, isProcessing, captureMode = "di
                     {captureMode === "command" ? "command mode" : "dictation"}
                   </span>
                 </div>
+                {interim && (
+                  <div className="desc" style={{
+                    marginTop: 6, fontStyle: "italic", opacity: 0.75,
+                    fontSize: 13, lineHeight: 1.4,
+                  }}>
+                    {interim}
+                  </div>
+                )}
               </>
             ) : isProcessing ? (
               <div className="hint" style={{ color: "var(--accent-brown)", fontWeight: 500 }}>Processing…</div>

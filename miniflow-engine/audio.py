@@ -38,6 +38,7 @@ _sample_rate = 16000
 _session_active = False
 _session_mode: str = "dictation"
 _final_fragments: list[str] = []       # accumulates is_final transcripts
+_latest_interim: str = ""              # most recent interim hypothesis (in-flight, not yet final)
 _last_seen_received: asyncio.Event | None = None
 _receive_task: asyncio.Task | None = None
 _chunk_queue: list[bytes] = []         # buffers chunks received before socket connects
@@ -117,10 +118,11 @@ async def prewarm_deepgram_key() -> None:
 
 
 async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
-    global _dg_ws, _sample_rate, _final_fragments, _session_active, _session_mode
+    global _dg_ws, _sample_rate, _final_fragments, _latest_interim, _session_active, _session_mode
     global _last_seen_received, _receive_task, _chunk_queue, _connecting
     _sample_rate = sample_rate
     _final_fragments = []
+    _latest_interim = ""
     _chunk_queue = []
     _connecting = True
     _session_active = True
@@ -142,9 +144,10 @@ async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
 
     url = (
         f"wss://api.deepgram.com/v1/listen"
-        f"?encoding=linear16&sample_rate={sample_rate}&language=en-US"
+        f"?model=nova-3"
+        f"&encoding=linear16&sample_rate={sample_rate}&language=en-US"
         f"&punctuate=true&numerals=true&smart_format=true"
-        f"&interim_results=false&endpointing=300"
+        f"&interim_results=true&endpointing=200"
     )
     try:
         _dg_ws = await websockets.connect(
@@ -215,14 +218,24 @@ async def stop_listening():
     except Exception as e:
         log.warning(f"Could not send CloseStream: {e}")
 
-    # Wait up to 2.5s for Deepgram's final speech_final transcript
+    # Short grace window for a speech_final that may already be in-flight. We
+    # intentionally don't block users on Deepgram's endpointing — they released
+    # the hotkey, they want the result NOW. If nothing finalizes in 300ms we
+    # proceed with the latest interim hypothesis.
     try:
         assert _last_seen_received is not None
-        await asyncio.wait_for(_last_seen_received.wait(), timeout=2.5)
+        await asyncio.wait_for(_last_seen_received.wait(), timeout=0.3)
     except asyncio.TimeoutError:
-        log.warning("Timed out waiting for Deepgram final (2.5s); proceeding with what we have")
+        pass
 
-    raw_text = _consolidate_fragments(_final_fragments)
+    # Prefer committed finals; fall back to the most recent interim for the tail
+    # Deepgram hasn't yet finalized. Interim hypotheses from Nova-3 are usually
+    # within a word of the final transcript on short utterances.
+    finals_text = _consolidate_fragments(_final_fragments)
+    if _latest_interim and _latest_interim not in finals_text:
+        raw_text = (finals_text + " " + _latest_interim).strip() if finals_text else _latest_interim
+    else:
+        raw_text = finals_text
 
     ws_to_close = _dg_ws
     task_to_cancel = _receive_task
@@ -290,6 +303,7 @@ async def stop_listening():
 
 async def _receive_transcripts():
     """Drain Deepgram messages. Keep is_final transcripts; signal on speech_final or close."""
+    global _latest_interim
     try:
         assert _dg_ws is not None
         async for msg in _dg_ws:
@@ -310,6 +324,11 @@ async def _receive_transcripts():
                 log.debug(f"Deepgram | is_final={is_final} speech_final={speech_final} | '{transcript}'")
                 if is_final and transcript:
                     _final_fragments.append(transcript)
+                    _latest_interim = ""   # finalized segment consumed the interim
+                elif transcript:
+                    # Interim hypothesis — stream to UI for live popover display.
+                    _latest_interim = transcript
+                    await _emit("transcription-interim", {"transcript": transcript})
                 if speech_final and _last_seen_received:
                     _last_seen_received.set()
 
