@@ -193,15 +193,21 @@ async function loadUsers() { return apiJson("/admin/users.json"); }
 
 function renderSummary(s) {
   const u = s.users;
+  const t = s.totals;
   const cards = [
+    // Users
     card("Total users", fmtInt(u.total), `${fmtInt(u.new_24h)} new in 24h · ${fmtInt(u.new_mtd)} MTD`),
     card("DAU", fmtInt(u.dau), "active last 24h"),
     card("WAU", fmtInt(u.wau), "active last 7d"),
     card("MAU", fmtInt(u.mau), "active MTD"),
-    card("Cost last 24h", fmtUSD(s.totals.cost_usd_24h), "LLM + STT"),
-    card("Cost MTD", fmtUSD(s.totals.cost_usd_mtd), "LLM + STT"),
-    card("STT sessions 24h", fmtInt(s.stt.last_24h.sessions), fmtUSD(s.stt.last_24h.cost_usd_est) + " est"),
-    card("STT sessions MTD", fmtInt(s.stt.mtd.sessions), fmtUSD(s.stt.mtd.cost_usd_est) + " est"),
+    // Cost breakdown: last 24h
+    card("LLM cost · 24h", fmtUSD(t.cost_usd_llm_24h), "OpenAI + Groq"),
+    card("STT cost · 24h", fmtUSD(t.cost_usd_stt_24h), `Deepgram · ${fmtInt(s.stt.last_24h.sessions)} sessions`),
+    card("Combined · 24h", fmtUSD(t.cost_usd_combined_24h), "LLM + STT"),
+    // Cost breakdown: MTD
+    card("LLM cost · MTD", fmtUSD(t.cost_usd_llm_mtd), "OpenAI + Groq"),
+    card("STT cost · MTD", fmtUSD(t.cost_usd_stt_mtd), `Deepgram · ${fmtInt(s.stt.mtd.sessions)} sessions`),
+    card("Combined · MTD", fmtUSD(t.cost_usd_combined_mtd), "LLM + STT"),
   ];
   document.getElementById("summary-cards").innerHTML = cards.join("");
 }

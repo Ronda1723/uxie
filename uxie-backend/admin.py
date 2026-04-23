@@ -120,8 +120,8 @@ async def stats_json(
     stt_24h = await _stt_totals(since_24h)
     stt_mtd = await _stt_totals(month_start)
 
-    total_cost_24h = sum(x["cost_usd_est"] for x in llm_24h) + stt_24h["cost_usd_est"]
-    total_cost_mtd = sum(x["cost_usd_est"] for x in llm_mtd) + stt_mtd["cost_usd_est"]
+    llm_cost_24h = sum(x["cost_usd_est"] for x in llm_24h)
+    llm_cost_mtd = sum(x["cost_usd_est"] for x in llm_mtd)
 
     return JSONResponse({
         "generated_at": now.isoformat(),
@@ -136,8 +136,14 @@ async def stats_json(
         "llm": {"last_24h": llm_24h, "mtd": llm_mtd},
         "stt": {"last_24h": stt_24h, "mtd": stt_mtd},
         "totals": {
-            "cost_usd_24h": round(total_cost_24h, 4),
-            "cost_usd_mtd": round(total_cost_mtd, 4),
+            # Split by provider kind so the dashboard can show three separate
+            # cost cards per timeframe.
+            "cost_usd_llm_24h": round(llm_cost_24h, 4),
+            "cost_usd_stt_24h": round(stt_24h["cost_usd_est"], 4),
+            "cost_usd_combined_24h": round(llm_cost_24h + stt_24h["cost_usd_est"], 4),
+            "cost_usd_llm_mtd": round(llm_cost_mtd, 4),
+            "cost_usd_stt_mtd": round(stt_mtd["cost_usd_est"], 4),
+            "cost_usd_combined_mtd": round(llm_cost_mtd + stt_mtd["cost_usd_est"], 4),
         },
     })
 
