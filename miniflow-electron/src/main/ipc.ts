@@ -88,9 +88,9 @@ export function registerIpc() {
     shell.openPath(`${homedir()}/miniflow`);
   });
 
-  // Save the Smallest AI (STT) key
+  // Save the Deepgram (STT) key
   ipcMain.handle(EXTRA.saveSmallestKey, (_e, key: string) =>
-    invoke("save_api_key", { service: "smallest", key })
+    invoke("save_api_key", { service: "deepgram", key })
   );
 
   // Run a typed-in text command through the agent

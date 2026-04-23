@@ -51,7 +51,13 @@ export function useAudioCapture() {
       }, MAX_DICTATION_MS);
       try {
         stream = await navigator.mediaDevices.getUserMedia({
-          audio: { channelCount: 1, sampleRate: SAMPLE_RATE, echoCancellation: true, noiseSuppression: true },
+          audio: {
+            channelCount: 1,
+            sampleRate: SAMPLE_RATE,
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          },
         });
       } catch (e) {
         console.error("[audio] getUserMedia failed:", e);
@@ -60,6 +66,7 @@ export function useAudioCapture() {
       ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
       source = ctx.createMediaStreamSource(stream);
       processor = ctx.createScriptProcessor(4096, 1, 1);
+      let chunkIdx = 0;
       processor.onaudioprocess = async (e) => {
         if (!active) return;
         const input = e.inputBuffer.getChannelData(0);
@@ -70,6 +77,14 @@ export function useAudioCapture() {
           let off = 0;
           for (const b of buffer) { flat.set(b, off); off += b.length; }
           buffer = []; bufferedSamples = 0;
+          // Log energy of first few chunks to diagnose silent-mic issues.
+          if (chunkIdx < 3) {
+            let sumSq = 0;
+            for (let i = 0; i < flat.length; i++) sumSq += flat[i] * flat[i];
+            const rms = Math.sqrt(sumSq / flat.length);
+            console.log(`[audio] chunk ${chunkIdx} rms=${rms.toFixed(4)} samples=${flat.length}`);
+            chunkIdx++;
+          }
           try { await window.miniflow.sendAudioChunk(base64(pcm16FromFloat32(flat))); }
           catch (err) { console.error("[audio] sendAudioChunk", err); }
         }
@@ -108,13 +123,8 @@ export function useAudioCapture() {
     });
     const offStop  = window.miniflow.onStopCapture(() => stop());
 
-    // If the window loses visibility (popover hides), force-stop the mic.
-    const onVis = () => { if (document.hidden) stop(); };
-    document.addEventListener("visibilitychange", onVis);
-
     return () => {
       offStart(); offStop();
-      document.removeEventListener("visibilitychange", onVis);
       stop();
     };
   }, []);
