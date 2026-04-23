@@ -34,8 +34,14 @@ _log = logging.getLogger("main")
 async def lifespan(app: FastAPI):
     try:
         await init_db()
+        _log.info("Database ready")
     except Exception as e:
-        _log.warning(f"DB init failed (non-fatal): {e}")
+        _log.critical(
+            f"Database connection failed: {e}\n"
+            "ACTION REQUIRED: Add a PostgreSQL service in Railway and ensure "
+            "DATABASE_URL is set in this service's environment variables."
+        )
+        raise
     yield
 
 
@@ -89,13 +95,31 @@ async def user_status(
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
-async def health():
+async def health(db: AsyncSession = Depends(get_db)):
+    from sqlalchemy import text
     from settings import get_settings
+    from fastapi import Response
+    import fastapi
+
     s = get_settings()
-    dg = s.deepgram_api_key.strip() if s.deepgram_api_key else ""
-    return {
-        "status": "ok",
-        "deepgram_configured": bool(dg),
-        "deepgram_key_prefix": dg[:8] + "..." if dg else "NOT SET",
-        "deepgram_key_length": len(dg),
+    dg = (s.deepgram_api_key or "").strip()
+
+    # Probe DB with a lightweight query
+    db_ok = False
+    try:
+        await db.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception:
+        pass
+
+    payload = {
+        "status": "ok" if db_ok else "degraded",
+        "db": "ok" if db_ok else "unreachable — add PostgreSQL in Railway",
+        "deepgram": "ok" if dg else "NOT SET — add DEEPGRAM_API_KEY in Railway",
+        "deepgram_key_prefix": (dg[:8] + "...") if dg else None,
+        "groq": "ok" if s.groq_api_key else "NOT SET",
+        "openai": "ok" if s.openai_api_key else "NOT SET",
     }
+
+    status_code = 200 if db_ok else 503
+    return fastapi.responses.JSONResponse(content=payload, status_code=status_code)

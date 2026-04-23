@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth import current_user, verify_jwt_only
+from auth import current_user
 from db import User, get_db
 from limits import check_and_increment
 from settings import get_settings
@@ -138,7 +138,8 @@ class STTSessionResponse(BaseModel):
 
 
 async def stt_session(
-    _jwt: dict = Depends(verify_jwt_only),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(current_user),
 ) -> STTSessionResponse:
     key = (_settings.deepgram_api_key or "").strip()
     if not key:
