@@ -27,9 +27,15 @@ from auth import current_user
 from db import User, get_db, init_db
 
 
+import logging
+_log = logging.getLogger("main")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db()
+    try:
+        await init_db()
+    except Exception as e:
+        _log.warning(f"DB init failed (non-fatal): {e}")
     yield
 
 

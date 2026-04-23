@@ -177,3 +177,10 @@ async def current_user(
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+
+async def verify_jwt_only(
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer),
+) -> dict:
+    """JWT-only auth — no DB lookup. Used for endpoints that don't need user data."""
+    return _decode_jwt(credentials.credentials)
