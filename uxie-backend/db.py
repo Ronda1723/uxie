@@ -28,6 +28,7 @@ def _now() -> datetime:
 
 
 def _async_db_url(url: str) -> str:
+    url = url.strip()  # env vars can have trailing newlines
     # Railway provides postgresql:// — asyncpg needs postgresql+asyncpg://
     if url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
