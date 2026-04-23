@@ -13,9 +13,11 @@ Endpoints:
   GET  /health
 """
 
+import logging
+import time
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,7 +29,7 @@ from auth import current_user
 from db import User, get_db, init_db
 
 
-import logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 _log = logging.getLogger("main")
 
 @asynccontextmanager
@@ -42,7 +44,10 @@ async def lifespan(app: FastAPI):
             "DATABASE_URL is set in this service's environment variables."
         )
         raise
-    yield
+    try:
+        yield
+    finally:
+        await proxy.close_http()
 
 
 app = FastAPI(title="Uxie Backend", version="0.1.0", lifespan=lifespan)
@@ -54,6 +59,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _timing(request: Request, call_next):
+    t0 = time.perf_counter()
+    try:
+        resp = await call_next(request)
+    except Exception:
+        dt_ms = (time.perf_counter() - t0) * 1000
+        _log.exception("%s %s EXC %.0fms", request.method, request.url.path, dt_ms)
+        raise
+    dt_ms = (time.perf_counter() - t0) * 1000
+    # Health gets a lot of traffic from uptime pings — keep it quiet
+    if request.url.path != "/health":
+        _log.info("%s %s %d %.0fms", request.method, request.url.path, resp.status_code, dt_ms)
+    return resp
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────

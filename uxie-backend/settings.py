@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     openai_api_key: str = ""
     deepgram_api_key: str = ""
+    deepgram_project_id: str = ""   # if set, /stt/session mints per-session scoped keys
+    deepgram_session_ttl_seconds: int = 300
 
     free_dictation_limit: int = 100   # per month
     free_command_limit: int = 50      # per month

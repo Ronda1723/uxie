@@ -4,11 +4,12 @@ Proxy routes — forwards LLM and STT requests on behalf of authenticated users.
 Routes:
   POST /llm/stream   — SSE streaming to Groq (dictation) or OpenAI (commands)
   POST /llm/chat     — non-streaming chat with optional tool calling
-  POST /stt/session  — returns the Deepgram API key to authenticated users
+  POST /stt/session  — mints a short-lived Deepgram key scoped to this user
 """
 
 from __future__ import annotations
 
+import logging
 from typing import AsyncIterator
 
 import httpx
@@ -23,6 +24,29 @@ from limits import check_and_increment
 from settings import get_settings
 
 _settings = get_settings()
+_log = logging.getLogger("proxy")
+
+
+# ── Shared HTTP client (connection pool + TLS reuse) ──────────────────────────
+
+_http: httpx.AsyncClient | None = None
+
+
+def get_http() -> httpx.AsyncClient:
+    global _http
+    if _http is None:
+        _http = httpx.AsyncClient(
+            timeout=httpx.Timeout(60.0, connect=10.0),
+            limits=httpx.Limits(max_connections=200, max_keepalive_connections=50),
+        )
+    return _http
+
+
+async def close_http() -> None:
+    global _http
+    if _http is not None:
+        await _http.aclose()
+        _http = None
 
 
 # ── LLM streaming proxy ───────────────────────────────────────────────────────
@@ -37,6 +61,7 @@ class LLMStreamRequest(BaseModel):
 
 _GROQ_BASE = "https://api.groq.com/openai/v1"
 _OPENAI_BASE = "https://api.openai.com/v1"
+_DEEPGRAM_BASE = "https://api.deepgram.com/v1"
 
 
 def _llm_base_and_key(provider: str) -> tuple[str, str]:
@@ -58,13 +83,13 @@ async def _stream_chunks(base_url: str, api_key: str, payload: dict) -> AsyncIte
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    async with httpx.AsyncClient(timeout=60) as client:
-        async with client.stream("POST", f"{base_url}/chat/completions",
-                                 headers=headers, json=payload) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if line:
-                    yield (line + "\n\n").encode()
+    client = get_http()
+    async with client.stream("POST", f"{base_url}/chat/completions",
+                             headers=headers, json=payload) as resp:
+        resp.raise_for_status()
+        async for line in resp.aiter_lines():
+            if line:
+                yield (line + "\n\n").encode()
 
 
 async def llm_stream(
@@ -117,31 +142,73 @@ async def llm_chat(
         payload["tools"] = body.tools
         payload["tool_choice"] = body.tool_choice or "auto"
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload,
-        )
-        resp.raise_for_status()
-        return resp.json()
+    client = get_http()
+    resp = await client.post(
+        f"{base_url}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 # ── STT session token ─────────────────────────────────────────────────────────
-# Return the server-side Deepgram API key to authenticated users.
-# The key never ships with the app — it lives only in Railway env vars.
+# If DEEPGRAM_PROJECT_ID is set, mint a per-session scoped key with short TTL.
+# Otherwise fall back to returning the master key (warn — legacy behavior).
 
 class STTSessionResponse(BaseModel):
     token: str
-    expires_in: int = 3600
+    expires_in: int = 300
     sample_rate: int = 16000
+
+
+async def _mint_deepgram_key(user_id: int) -> str | None:
+    master = (_settings.deepgram_api_key or "").strip()
+    project_id = (_settings.deepgram_project_id or "").strip()
+    if not master or not project_id:
+        return None
+    try:
+        client = get_http()
+        resp = await client.post(
+            f"{_DEEPGRAM_BASE}/projects/{project_id}/keys",
+            headers={
+                "Authorization": f"Token {master}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "comment": f"uxie-user-{user_id}",
+                "scopes": ["usage:write"],
+                "time_to_live_in_seconds": _settings.deepgram_session_ttl_seconds,
+                "tags": [f"user:{user_id}"],
+            },
+        )
+        if resp.status_code in (200, 201):
+            return resp.json().get("key")
+        _log.warning(
+            "Deepgram key mint failed: %s %s", resp.status_code, resp.text[:200]
+        )
+        return None
+    except Exception as e:
+        _log.warning("Deepgram key mint exception: %s", e)
+        return None
 
 
 async def stt_session(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(current_user),
 ) -> STTSessionResponse:
-    key = (_settings.deepgram_api_key or "").strip()
-    if not key:
+    ephemeral = await _mint_deepgram_key(user.id)
+    if ephemeral:
+        return STTSessionResponse(
+            token=ephemeral,
+            expires_in=_settings.deepgram_session_ttl_seconds,
+        )
+
+    master = (_settings.deepgram_api_key or "").strip()
+    if not master:
         raise HTTPException(500, "Deepgram API key not configured on server")
-    return STTSessionResponse(token=key, expires_in=3600)
+    _log.warning(
+        "Returning master Deepgram key to user %s — set DEEPGRAM_PROJECT_ID to enable ephemeral keys",
+        user.id,
+    )
+    return STTSessionResponse(token=master, expires_in=3600)
