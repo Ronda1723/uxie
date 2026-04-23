@@ -108,7 +108,7 @@ async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
     try:
         _dg_ws = await websockets.connect(
             url,
-            extra_headers={"Authorization": f"Bearer {key}"},
+            extra_headers={"Authorization": f"Token {key}"},
             ssl=_SSL_CTX,
         )
     except Exception as e:
