@@ -41,7 +41,7 @@ DEFAULT_SETTINGS = {
 }
 
 DEFAULT_LLM_CONFIG: dict[str, Any] = {
-    "active": "openai",
+    "active": "uxie",
     "providers": {
         "openai":    {"model": "gpt-4o",                         "base_url": None},
         "anthropic": {"model": "claude-3-5-sonnet-20241022",     "base_url": None},

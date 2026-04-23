@@ -1,18 +1,14 @@
 """
-Audio — non-streaming STT pipeline.
+Audio — non-streaming STT pipeline (Deepgram).
 
 Lifecycle:
-    1. start_listening(mode)  → open Waves WebSocket, reset buffers
-    2. send_audio_chunk(b64)  → forward PCM to Waves as it arrives
-    3. stop_listening()       → send "finalize" to Waves, wait for the final
-                                 full transcript, then run it through the LLM
-                                 (grammar-correct or full agent) before
-                                 emitting anything to the UI.
+    1. start_listening(mode)  → open Deepgram WebSocket, reset buffers
+    2. send_audio_chunk(b64)  → forward PCM to Deepgram as it arrives
+    3. stop_listening()       → send CloseStream, wait for final transcript,
+                                 then run it through the LLM before emitting.
 
-Design choice: we do NOT emit interim transcripts to the UI. Waves streams
-partial results at typing speed; showing them live produces the "jumpy, broken"
-output the user noticed. We only emit ONE `transcription` event at the end
-with the final, de-duplicated, LLM-cleaned text.
+Design choice: we do NOT emit interim transcripts to the UI. We only emit ONE
+`transcription` event at the end with the final, de-duplicated, LLM-cleaned text.
 """
 
 from __future__ import annotations
@@ -36,15 +32,14 @@ log = logging.getLogger("audio")
 _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
 
 _broadcaster: Callable | None = None
-_waves_ws = None
+_dg_ws = None                          # Deepgram WebSocket
 _sample_rate = 16000
 _session_active = False
 _session_mode: str = "dictation"
-_final_fragments: list[str] = []  # accumulates per-utterance finals from Waves
+_final_fragments: list[str] = []       # accumulates is_final transcripts
 _last_seen_received: asyncio.Event | None = None
 _receive_task: asyncio.Task | None = None
-_cached_waves_token: str | None = None  # cached for the app session lifetime
-_chunk_queue: list[bytes] = []  # buffers chunks received before Waves connects
+_chunk_queue: list[bytes] = []         # buffers chunks received before socket connects
 _connecting: bool = False
 
 
@@ -60,34 +55,28 @@ async def _emit(event: str, payload):
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-async def _fetch_stt_token() -> str | None:
-    """Return cached Waves token, fetching from Uxie backend only on first call."""
-    global _cached_waves_token
-    if _cached_waves_token:
-        return _cached_waves_token
-    jwt = config.get_jwt()
+async def _get_deepgram_key() -> str | None:
+    """Fetch a Deepgram API key from the Uxie backend (server holds the key)."""
+    import config as _config
+    jwt = _config.get_jwt()
     if not jwt:
         return None
     try:
         import httpx
-        base = config.get_uxie_backend_url()
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
-                f"{base}/stt/session",
+                f"{_config.get_uxie_backend_url()}/stt/session",
                 headers={"Authorization": f"Bearer {jwt}"},
             )
             resp.raise_for_status()
-            token = resp.json().get("token")
-            if token:
-                _cached_waves_token = token
-            return token
+            return resp.json().get("token")
     except Exception as e:
-        log.warning(f"Failed to fetch STT session token from Uxie backend: {e}")
+        log.error(f"Failed to fetch STT token from backend: {e}")
         return None
 
 
 async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
-    global _waves_ws, _sample_rate, _final_fragments, _session_active, _session_mode
+    global _dg_ws, _sample_rate, _final_fragments, _session_active, _session_mode
     global _last_seen_received, _receive_task, _chunk_queue, _connecting
     _sample_rate = sample_rate
     _final_fragments = []
@@ -98,45 +87,41 @@ async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
     _last_seen_received = asyncio.Event()
     log.info(f"Starting listening session: mode={_session_mode}")
 
-    # Capture selected text NOW (before the Waves socket opens) so transform
-    # commands ("polish this", "make this concise") have the selection available.
+    # Capture selected text NOW so transform commands have the selection available.
     if _session_mode == "command":
         import agent as _agent
         _agent.capture_selected_text()
 
-    # Try Uxie backend token first; fall back to locally-stored master key
-    key = await _fetch_stt_token()
+    key = await _get_deepgram_key()
     if not key:
-        try:
-            key = config.get_smallest_key()
-        except ValueError as e:
-            _connecting = False
-            await _emit("transcription-error", str(e))
-            return
+        _connecting = False
+        await _emit("transcription-error", "Not signed in to Uxie. Please sign in from Settings.")
+        return
 
     url = (
-        f"wss://api.smallest.ai/waves/v1/pulse/get_text"
-        f"?encoding=linear16&sample_rate={sample_rate}&language=en"
-        f"&word_timestamps=false&numerals=true"
+        f"wss://api.deepgram.com/v1/listen"
+        f"?encoding=linear16&sample_rate={sample_rate}&language=en-US"
+        f"&punctuate=true&numerals=true&smart_format=true"
+        f"&interim_results=false&endpointing=300"
     )
     try:
-        _waves_ws = await websockets.connect(
+        _dg_ws = await websockets.connect(
             url,
-            extra_headers={"Authorization": f"Bearer {key}"},
+            extra_headers={"Authorization": f"Token {key}"},
             ssl=_SSL_CTX,
         )
     except Exception as e:
-        log.error(f"Waves connect failed: {e}")
+        log.error(f"Deepgram connect failed: {e}")
         _connecting = False
-        await _emit("transcription-error", f"Could not connect to Smallest AI Waves: {e}")
+        await _emit("transcription-error", f"Could not connect to Deepgram: {e}")
         return
 
     # Flush any chunks that arrived while we were connecting
     if _chunk_queue:
-        log.info(f"Flushing {len(_chunk_queue)} queued chunks to Waves")
+        log.info(f"Flushing {len(_chunk_queue)} queued chunks to Deepgram")
         for queued in _chunk_queue:
             try:
-                await _waves_ws.send(queued)
+                await _dg_ws.send(queued)
             except Exception as e:
                 log.error(f"flush queued chunk: {e}")
                 break
@@ -144,7 +129,7 @@ async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
     _connecting = False
 
     _receive_task = asyncio.create_task(_receive_transcripts())
-    log.info(f"Waves connected (sample_rate={sample_rate})")
+    log.info(f"Deepgram connected (sample_rate={sample_rate})")
 
 
 async def send_audio_chunk(chunk: str):
@@ -152,42 +137,40 @@ async def send_audio_chunk(chunk: str):
     if _connecting:
         _chunk_queue.append(decoded)
         return
-    if _waves_ws:
+    if _dg_ws:
         try:
-            await _waves_ws.send(decoded)
+            await _dg_ws.send(decoded)
         except Exception as e:
             log.error(f"send_audio_chunk: {e}")
 
 
 async def stop_listening():
-    """Finalize the Waves session, grab the final transcript, and run it through
-    the LLM before emitting anything to the UI."""
-    global _waves_ws, _session_active, _receive_task
-    if not _waves_ws:
+    """Close the Deepgram session, grab the final transcript, run through LLM."""
+    global _dg_ws, _session_active, _receive_task
+    if not _dg_ws:
         log.info("stop_listening: no active session")
         return
 
     await _emit("agent-status", "processing")
 
+    # Tell Deepgram we're done sending audio
     try:
-        await _waves_ws.send(json.dumps({"type": "finalize"}))
+        await _dg_ws.send(json.dumps({"type": "CloseStream"}))
     except Exception as e:
-        log.warning(f"Could not send finalize: {e}")
+        log.warning(f"Could not send CloseStream: {e}")
 
-    # Wait up to 800ms for Waves' is_last before proceeding.
+    # Wait up to 1.5s for Deepgram's final speech_final transcript
     try:
         assert _last_seen_received is not None
-        await asyncio.wait_for(_last_seen_received.wait(), timeout=0.8)
+        await asyncio.wait_for(_last_seen_received.wait(), timeout=1.5)
     except asyncio.TimeoutError:
-        log.warning("Timed out waiting for is_last (800ms); proceeding with what we have")
+        log.warning("Timed out waiting for Deepgram final (1.5s); proceeding with what we have")
 
-    # Snapshot the transcript NOW so we can start the LLM immediately.
     raw_text = _consolidate_fragments(_final_fragments)
 
-    # Close socket + cancel receive task in the background — don't block LLM start.
-    ws_to_close = _waves_ws
+    ws_to_close = _dg_ws
     task_to_cancel = _receive_task
-    _waves_ws = None
+    _dg_ws = None
     _receive_task = None
     _session_active = False
 
@@ -200,7 +183,7 @@ async def stop_listening():
         if task_to_cancel:
             task_to_cancel.cancel()
     asyncio.create_task(_cleanup())
-    log.info(f"Waves final raw ({len(_final_fragments)} fragments): '{raw_text[:120]}'")
+    log.info(f"Deepgram final raw ({len(_final_fragments)} fragments): '{raw_text[:120]}'")
     import agent as _agent
     await _emit("debug", {
         "type": "stt",
@@ -250,30 +233,44 @@ async def stop_listening():
 # ── Internal ──────────────────────────────────────────────────────────────────
 
 async def _receive_transcripts():
-    """Drain Waves messages. We keep only `is_final` transcripts and signal
-    `_last_seen_received` when `is_last` arrives so stop_listening can proceed."""
+    """Drain Deepgram messages. Keep is_final transcripts; signal on speech_final or close."""
     try:
-        assert _waves_ws is not None
-        async for msg in _waves_ws:
+        assert _dg_ws is not None
+        async for msg in _dg_ws:
             try:
                 data = json.loads(msg)
             except Exception:
                 continue
-            transcript = (data.get("transcript") or "").strip()
-            is_final = bool(data.get("is_final", False))
-            is_last = bool(data.get("is_last", False))
-            log.debug(f"Waves | is_final={is_final} is_last={is_last} | '{transcript}'")
-            if is_final and transcript:
-                _final_fragments.append(transcript)
-            if is_last:
+
+            msg_type = data.get("type", "")
+
+            # Final transcript for a completed utterance
+            if msg_type == "Results":
+                channel = data.get("channel", {})
+                alts = channel.get("alternatives", [{}])
+                transcript = (alts[0].get("transcript") or "").strip()
+                is_final = bool(data.get("is_final", False))
+                speech_final = bool(data.get("speech_final", False))
+                log.debug(f"Deepgram | is_final={is_final} speech_final={speech_final} | '{transcript}'")
+                if is_final and transcript:
+                    _final_fragments.append(transcript)
+                if speech_final and _last_seen_received:
+                    _last_seen_received.set()
+
+            # Deepgram sends this when the stream is fully closed
+            elif msg_type in ("Metadata", "SpeechStarted"):
+                pass  # ignore metadata events
+
+            elif msg_type == "CloseStream" or data.get("created"):
                 if _last_seen_received:
                     _last_seen_received.set()
                 break
+
     except websockets.exceptions.ConnectionClosed:
         if _last_seen_received:
             _last_seen_received.set()
     except Exception as e:
-        log.error(f"Waves receive error: {e}")
+        log.error(f"Deepgram receive error: {e}")
         if _last_seen_received:
             _last_seen_received.set()
 

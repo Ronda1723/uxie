@@ -43,7 +43,6 @@ function AccountTab() {
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
-  const [showLogin, setShowLogin] = useState(false);
 
   async function load() {
     setLoading(true);

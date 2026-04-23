@@ -3,13 +3,12 @@ Proxy routes — forwards LLM and STT requests on behalf of authenticated users.
 
 Routes:
   POST /llm/stream   — SSE streaming to Groq (dictation) or OpenAI (commands)
-  POST /stt/session  — returns a short-lived Waves STT session token (JWT signed by Uxie)
+  POST /llm/chat     — non-streaming chat with optional tool calling
+  POST /stt/session  — returns the Deepgram API key to authenticated users
 """
 
 from __future__ import annotations
 
-import asyncio
-import time
 from typing import AsyncIterator
 
 import httpx
@@ -91,16 +90,50 @@ async def llm_stream(
     )
 
 
+# ── LLM non-streaming (tool calling / commands) ───────────────────────────────
+
+class LLMChatRequest(BaseModel):
+    messages: list[dict]
+    model: str = "gpt-4o"
+    provider: str = "openai"
+    temperature: float = 0.2
+    tools: list[dict] | None = None
+    tool_choice: str | None = None
+
+
+async def llm_chat(
+    body: LLMChatRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    await check_and_increment(db, user, "command")
+    base_url, api_key = _llm_base_and_key(body.provider)
+    payload: dict = {
+        "model": body.model,
+        "messages": body.messages,
+        "temperature": body.temperature,
+    }
+    if body.tools:
+        payload["tools"] = body.tools
+        payload["tool_choice"] = body.tool_choice or "auto"
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
 # ── STT session token ─────────────────────────────────────────────────────────
-# We issue a short-lived Waves token so the client can connect directly to
-# Waves without ever seeing Uxie's master Waves API key.
-#
-# Implementation: Waves /v1/pulse/get_token exchanges our master key for a
-# short-lived session token. We fetch that and return it to the client.
+# Return the server-side Deepgram API key to authenticated users.
+# The key never ships with the app — it lives only in Railway env vars.
 
 class STTSessionResponse(BaseModel):
     token: str
-    expires_in: int   # seconds
+    expires_in: int = 3600
     sample_rate: int = 16000
 
 
@@ -108,24 +141,6 @@ async def stt_session(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(current_user),
 ) -> STTSessionResponse:
-    if not _settings.waves_api_key:
-        raise HTTPException(500, "Waves API key not configured on server")
-
-    # Exchange our master key for a short-lived session token
-    url = "https://api.smallest.ai/waves/v1/pulse/get_token"
-    ttl = _settings.waves_session_ttl_seconds
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(
-            url,
-            headers={"Authorization": f"Bearer {_settings.waves_api_key}"},
-            json={"ttl": ttl},
-        )
-        if resp.status_code != 200:
-            raise HTTPException(502, f"Waves token fetch failed: {resp.text}")
-        data = resp.json()
-
-    session_token = data.get("token") or data.get("access_token")
-    if not session_token:
-        raise HTTPException(502, "Waves returned no token")
-
-    return STTSessionResponse(token=session_token, expires_in=ttl)
+    if not _settings.deepgram_api_key:
+        raise HTTPException(500, "Deepgram API key not configured on server")
+    return STTSessionResponse(token=_settings.deepgram_api_key, expires_in=3600)

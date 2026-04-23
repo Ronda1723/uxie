@@ -18,8 +18,7 @@ class Settings(BaseSettings):
 
     groq_api_key: str = ""
     openai_api_key: str = ""
-    waves_api_key: str = ""
-    waves_session_ttl_seconds: int = 300  # 5 min
+    deepgram_api_key: str = ""
 
     free_dictation_limit: int = 100   # per month
     free_command_limit: int = 50      # per month
