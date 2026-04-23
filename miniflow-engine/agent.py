@@ -20,13 +20,78 @@ from typing import Callable, Any
 import config
 import history
 import llm as llm_module
-import oauth
 import dictation as dictation_module
+import oauth
 from connectors import registry as connector_registry
 
 log = logging.getLogger("agent")
 _broadcaster: Callable | None = None
 _target_bundle_id: str | None = None
+_target_page_url: str | None = None  # set for browser tabs at recording start
+
+# ── Approval gate ─────────────────────────────────────────────────────────────
+_approval_event: asyncio.Event | None = None
+_approval_result: bool = False  # set by resolve_approval()
+
+# Tools that must be approved before execution
+APPROVAL_REQUIRED_TOOLS = {
+    "gmail_send", "gmail_reply", "gmail_send_email",
+    "slack_send_message", "slack_context_reply", "slack_post",
+    "create_calendar_event", "delete_file", "move_file",
+    "linear_create_issue", "notion_create_page",
+    "github_create_pr", "github_create_issue",
+    "jira_create_issue",
+}
+
+TOOL_SUMMARIES = {
+    "gmail_send":           lambda a: f"Send email to {a.get('to','?')} — \"{a.get('subject','?')}\"",
+    "gmail_reply":          lambda a: f"Reply to email: \"{a.get('subject','?')}\"",
+    "gmail_send_email":     lambda a: f"Send email to {a.get('to','?')}",
+    "slack_send_message":   lambda a: f"Post to {a.get('channel','?')}: \"{a.get('text','?')[:80]}\"",
+    "slack_context_reply":  lambda a: f"Reply in {a.get('channel','?')}: \"{a.get('text','?')[:80]}\"",
+    "slack_post":           lambda a: f"Post to Slack: \"{a.get('text','?')[:80]}\"",
+    "create_calendar_event":lambda a: f"Create calendar event: \"{a.get('title','?')}\"",
+    "delete_file":          lambda a: f"Delete file: {a.get('path','?')}",
+    "move_file":            lambda a: f"Move {a.get('source','?')} → {a.get('destination','?')}",
+    "linear_create_issue":  lambda a: f"Create Linear issue: \"{a.get('title','?')}\"",
+    "notion_create_page":   lambda a: f"Create Notion page: \"{a.get('title','?')}\"",
+    "github_create_pr":     lambda a: f"Create PR: \"{a.get('title','?')}\"",
+    "github_create_issue":  lambda a: f"Create GitHub issue: \"{a.get('title','?')}\"",
+    "jira_create_issue":    lambda a: f"Create Jira issue: \"{a.get('summary','?')}\"",
+}
+
+
+async def _approval_gate(tool_name: str, args: dict) -> bool:
+    """Emit approval-needed, block until user responds or 60s timeout. Returns True if approved."""
+    global _approval_event, _approval_result
+    summary = TOOL_SUMMARIES.get(tool_name, lambda a: tool_name)(args)
+    _approval_event = asyncio.Event()
+    _approval_result = False
+    await _emit("approval-needed", {"tool": tool_name, "summary": summary, "params": args})
+    try:
+        await asyncio.wait_for(_approval_event.wait(), timeout=60.0)
+    except asyncio.TimeoutError:
+        log.warning(f"Approval timed out for {tool_name} — auto-cancelling")
+        await _emit("approval-resolved", {"approved": False, "reason": "timeout"})
+        return False
+    return _approval_result
+
+
+def resolve_approval(approved: bool):
+    """Called from the IPC handler when the user clicks Do it / Cancel."""
+    global _approval_result, _approval_event
+    _approval_result = approved
+    if _approval_event:
+        _approval_event.set()
+_selected_text: str = ""  # captured at session start for transform commands
+
+TRANSFORM_KEYWORDS = {
+    "polish", "polished", "fix", "clean", "cleanup",
+    "concise", "shorten", "shorter", "summarize", "brief",
+    "formal", "professional", "casual", "friendly", "friendly tone",
+    "translate",
+    "rewrite", "rephrase", "paraphrase",
+}
 
 
 def set_event_broadcaster(fn: Callable):
@@ -34,9 +99,63 @@ def set_event_broadcaster(fn: Callable):
     _broadcaster = fn
 
 
+_BROWSER_URL_SCRIPTS: dict[str, str] = {
+    "com.google.Chrome":         'tell application "Google Chrome" to get URL of active tab of front window',
+    "com.apple.Safari":          'tell application "Safari" to get URL of current tab of front window',
+    "org.mozilla.firefox":       'tell application "Firefox" to get URL of active tab of front window',
+    "com.microsoft.edgemac":     'tell application "Microsoft Edge" to get URL of active tab of front window',
+}
+
 def set_target_app(bundle_id: str | None):
-    global _target_bundle_id
+    global _target_bundle_id, _target_page_url
     _target_bundle_id = bundle_id
+    _target_page_url = None
+    if bundle_id in _BROWSER_URL_SCRIPTS:
+        try:
+            import subprocess
+            _target_page_url = subprocess.check_output(
+                ["osascript", "-e", _BROWSER_URL_SCRIPTS[bundle_id]],
+                timeout=0.5, encoding="utf8"
+            ).strip()
+        except Exception:
+            pass
+    log.info(f"Target app: {bundle_id} url={_target_page_url}")
+
+
+def capture_selected_text():
+    """Read the current text selection from the frontmost app via the Accessibility API.
+    Called at session start (before Waves connects) so we have it ready for transform commands."""
+    global _selected_text
+    _selected_text = _read_selected_text()
+    if _selected_text:
+        log.info(f"Captured selected text ({len(_selected_text)} chars)")
+
+
+def _read_selected_text() -> str:
+    """Use pyobjc Accessibility API to get AXSelectedText from the frontmost app."""
+    try:
+        import AppKit
+        from ApplicationServices import (
+            AXUIElementCreateApplication,
+            AXUIElementCopyAttributeValue,
+            kAXErrorSuccess,
+        )
+        ws = AppKit.NSWorkspace.sharedWorkspace()
+        front_app = ws.frontmostApplication()
+        if not front_app:
+            return ""
+        pid = front_app.processIdentifier()
+        app_ref = AXUIElementCreateApplication(pid)
+        err, focused = AXUIElementCopyAttributeValue(app_ref, "AXFocusedUIElement", None)
+        if err != kAXErrorSuccess or not focused:
+            return ""
+        err, value = AXUIElementCopyAttributeValue(focused, "AXSelectedText", None)
+        if err != kAXErrorSuccess or not value:
+            return ""
+        return str(value).strip()
+    except Exception as e:
+        log.debug(f"_read_selected_text: {e}")
+        return ""
 
 
 async def _emit(event: str, payload: Any):
@@ -46,124 +165,89 @@ async def _emit(event: str, payload: Any):
 
 # ── System prompt (ported 1:1 from agent.rs) ──
 
-SYSTEM_PROMPT = """You are MiniFlow, a voice-powered desktop agent for macOS. The user speaks and you decide what to do.
+SYSTEM_PROMPT = """You are Uxie, a voice-powered desktop agent for macOS. The user speaks and you decide what to do.
 
 MULTILINGUAL SUPPORT:
-The user may speak in English, Hindi, or Spanish. You MUST understand commands in ALL three languages and map them to the correct tool calls. The tool parameters (like URLs, app names, queries) should remain in whatever language the user spoke them, except for macOS application names which should always be their actual English names (e.g. "Google Chrome", "Safari", "Finder").
+The user may speak in English, Hindi, or Spanish. Understand commands in all three and map them to the correct tools. Keep parameters in the user's language except macOS app names (always English: "Google Chrome", "Safari", "Finder").
 
-Examples of equivalent commands across languages:
+Examples of equivalent commands:
 - EN: "Open YouTube" / HI: "YouTube खोलो" / ES: "Abre YouTube" → open_browser_tab
-- EN: "Search for restaurants nearby" / HI: "आस-पास के रेस्टोरेंट खोजो" / ES: "Busca restaurantes cercanos" → search_google
-- EN: "Send a message on Slack to #general saying hello" / HI: "Slack पर #general में hello भेजो" / ES: "Envía un mensaje en Slack a #general diciendo hola" → slack_send_message
-- EN: "Open Finder" / HI: "Finder खोलो" / ES: "Abre Finder" → open_application
-- EN: "Open my Downloads folder" / HI: "Downloads फोल्डर खोलो" / ES: "Abre la carpeta Descargas" → open_finder (path: ~/Downloads)
-- EN: "Show me the Desktop" / "Go to Documents" / "Open ~/Code" → open_finder
-- EN: "Open Applications folder" → open_finder (path: /Applications)
+- EN: "Search for restaurants" / HI: "रेस्टोरेंट खोजो" / ES: "Busca restaurantes" → search_google
+- EN: "Open Finder" / HI: "Finder खोलो" → open_application
+- EN: "Open Downloads" / HI: "Downloads फोल्डर खोलो" → open_finder (path: ~/Downloads)
 - EN: "Quit Safari" / HI: "Safari बंद करो" / ES: "Cierra Safari" → quit_application
-- EN: "Copy this to clipboard" / HI: "यह क्लिपबोर्ड में कॉपी करो" / ES: "Copia esto al portapapeles" → clipboard_write
-- EN: "Reply in #general agreeing with the plan" / HI: "#general में plan से agree करते हुए reply करो" / ES: "Responde en #general estando de acuerdo con el plan" → slack_context_reply
-- EN: "Create a file called notes.txt" / HI: "notes.txt नाम की फाइल बनाओ" / ES: "Crea un archivo llamado notes.txt" → create_file
+- EN: "Book a table at Nobu Friday 8pm" → browser_navigate + browser_click (Playwright)
+- EN: "Create a file notes.txt" / HI: "notes.txt बनाओ" → create_file
 
-You have the following LOCAL capabilities (always available):
-1. open_browser_tab - Open a URL in Google Chrome
-2. search_google - Search Google for a query (opens in Chrome)
-3. open_application - Launch a macOS application by name
-4. quit_application - Quit a running macOS application
-5. clipboard_write - Write text to the clipboard
-6. clipboard_read - Read current clipboard contents
-7. open_finder - Open a Finder window at a path
-8. create_file - Create a new file at a path with optional content
-9. move_file - Move/rename a file from one path to another
+── LOCAL TOOLS (always available) ──────────────────────────────────────────
+1. open_browser_tab   — open a URL in Chrome
+2. search_google      — search Google (opens in Chrome)
+3. open_application   — launch a macOS app by name
+4. quit_application   — quit a running macOS app
+5. clipboard_write    — write text to clipboard
+6. clipboard_read     — read clipboard contents
+7. open_finder        — open a folder in Finder
+8. create_file        — create a file with optional content
+9. move_file          — move or rename a file
 
-You may also have CONNECTED SERVICE capabilities (only if the user has connected them in Settings):
-- Gmail: gmail_search, gmail_read, gmail_send, gmail_reply, gmail_draft
-- Google Drive: drive_search, drive_read, drive_list
-- Google Calendar: calendar_list_events, calendar_create_event, calendar_check_availability
-- Slack: slack_send_message, slack_search, slack_list_channels, slack_read_channel, slack_context_reply, slack_summarize
-- Discord: discord_send_message, discord_read_channel, discord_list_servers
-- GitHub: github_create_issue, github_list_issues, github_create_pr, github_search_repos
-- Jira: jira_create_issue, jira_search, jira_update_status
-- Linear: linear_create_issue, linear_list_issues, linear_update_status
-- Notion: notion_search, notion_create_page, notion_read_page, notion_update_page
-- Spotify: spotify_play, spotify_pause, spotify_skip, spotify_now_playing, spotify_search, spotify_queue
+── BROWSER AUTOMATION (always available via Playwright) ────────────────────
+You always have browser tools (browser_navigate, browser_click, browser_type, browser_snapshot, etc.).
+WORKFLOW: browser_navigate → browser_snapshot (see the page) → browser_click/type → snapshot again → repeat.
 
-Only use connector tools that are included in the available tools list for this request.
+GMAIL (browser_navigate to https://mail.google.com):
+  "send email / compose / write email" → click Compose → fill To / Subject / Body → click Send
+  "read emails / what's in my inbox" → snapshot inbox, read subjects and senders
+  "search emails about X" → click search bar → type query → snapshot results
 
-IMPORTANT DECISION RULE:
-- If the user's speech is clearly a COMMAND (in English, Hindi, or Spanish) that matches one of your available tool functions, call the appropriate tool function(s). ALWAYS prefer using a tool over treating text as dictation.
-- Hindi command patterns to recognize: "खोलो" (open), "बंद करो" (quit/close), "भेजो" (send), "खोजो/ढूंढो" (search), "बनाओ" (create), "कॉपी करो" (copy), "पढ़ो" (read), "reply करो" (reply), "मूव करो" (move), "ड्राफ्ट" (draft), "मेल/ईमेल" (mail/email).
-- Spanish command patterns to recognize: "abre/abrir" (open), "cierra/cerrar" (quit/close), "envía/enviar" (send), "busca/buscar" (search), "crea/crear" (create), "copia/copiar" (copy), "lee/leer" (read), "responde/responder" (reply), "mueve/mover" (move), "borrador" (draft), "correo" (email).
+GOOGLE CALENDAR (browser_navigate to https://calendar.google.com):
+  "schedule meeting / create event / book time" → click Create → fill details → Save
+  "what's on my calendar / what do I have today" → snapshot calendar view
 
-GMAIL RULES (when gmail tools are available):
-CRITICAL: If the user's speech contains ANY of these words: "email", "mail", "gmail", "correo", "मेल", "ईमेल" — you MUST use a gmail tool. NEVER return DICTATION for speech that mentions email/mail/gmail.
-- If they want to send: use gmail_send. If they want to draft/write/compose: use gmail_draft. If they want to search: use gmail_search.
-- The "to" field: The user may say an email address, but speech-to-text often garbles addresses. Try your best to reconstruct it.
-- For subject: extract from "subject X" or "about X". If none, generate a short one from content.
-- For body: compose a well-structured email with greeting, content, and sign-off.
+SLACK (browser_navigate to https://app.slack.com):
+  "post to #channel / message someone" → find channel in sidebar → click it → type → Enter
+  "what's in #channel / summarize Slack" → open channel → snapshot recent messages → summarize
 
-GMAIL SUMMARY FORMAT:
-  From: [Sender Name]
-  Subject: [Subject line]
-  Summary: [2–3 sentences]
+ANY WEBSITE — booking, forms, reading, ordering:
+  "book a table at X", "order from Y", "fill out Z form" → navigate to site → interact with UI
 
-GMAIL REPLY COMPOSITION:
-  1. Extract sender's first name from "From" header.
-  2. Open: "Hi [FirstName],"
-  3. Acknowledge their email content in 1 sentence.
-  4. Expand user's intent into complete sentences.
-  5. Close with warm sign-off using [User name: ...] hint if present.
+── CONNECTED SERVICE TOOLS (only when shown in your tools list) ────────────
 
-FLOW PATTERNS:
-- "Summarize my emails": gmail_search "is:unread" limit 5 → gmail_read each → GMAIL SUMMARY FORMAT.
-- "Reply to X's last email saying Y": gmail_search → gmail_read → compose reply → gmail_reply with threadId.
-- IMPORTANT: gmail_read returns "threadId". Always use it when calling gmail_reply.
+GMAIL (gmail_search, gmail_read, gmail_send, gmail_reply, gmail_draft):
+  CRITICAL: "email", "mail", "gmail", "मेल", "correo" → MUST use gmail tool.
+  - Send → gmail_send  |  Draft → gmail_draft  |  Search → gmail_search
+  - Reply flow: gmail_search → gmail_read (get threadId) → gmail_reply
+  - Summary format: "From: X | Subject: Y | Summary: …"
 
-SLACK RULES (when slack tools are available):
-- For Slack messaging: use slack_send_message. Channel accepts #channel, @user, or username.
-- For context-aware replies: use slack_context_reply with channel + intent.
-- For summarization: use slack_summarize (reads recent messages, returns summary, does NOT post).
-- CRITICAL: "summarize" + any channel name or "slack" → ALWAYS slack_summarize. Never DICTATION.
+GOOGLE CALENDAR (calendar_list_events, calendar_create_event, calendar_check_availability):
+  CRITICAL: "meeting", "schedule", "book time", "calendar", "appointment" → use calendar tool.
+  - Default duration: 1 hour. Default timezone: America/New_York.
 
-SLACK SUMMARY FORMAT:
-  Channel: [#channel-name]
-  Summary: [2–4 sentences on main discussion, decisions, action items]
-  Key points:
-  - [Most important]
-  - [Second most important]
-  - [Pending questions or action items]
+SLACK (slack_send_message, slack_read_channel, slack_summarize, slack_list_channels):
+  CRITICAL: "Slack", "#channel", "post to" → use slack tool.
+  - Summaries: slack_summarize (reads channel, returns summary, does NOT post).
 
-CALENDAR RULES (when calendar tools are available):
-CRITICAL: "meeting", "schedule", "book", "appointment", "call", "invite", "calendar", "मीटिंग", "reunión" → MUST use calendar tool.
-- booking: calendar_create_event
-- listing: calendar_list_events
-- availability: calendar_check_availability
-- Default duration: 1 hour. Default timezone: America/New_York.
-- Add attendees to "attendees" array — Google Calendar sends invites automatically.
+GITHUB — triggered by: "GitHub", "issue", "PR", "repo"
+LINEAR — triggered by: "Linear", "ticket", "story"
+NOTION  — triggered by: "Notion", "page", "database"
 
-CALENDAR OUTPUT FORMAT:
-  ✓ Meeting booked: [Title]
-  When: [Day, Date at Time] ([duration])
-  With: [Attendee]
-  Calendar link: [link]
+── DECISION RULES ─────────────────────────────────────────────────────────
+1. Local tool match → use it.
+2. Gmail / Calendar / Slack connected → use their tools (gmail_*, calendar_*, slack_*).
+3. GitHub / Linear / Notion connected → use MCP tools from your tools list.
+4. Web task with no dedicated tool → use Playwright browser tools.
+5. Pure dictation → respond ONLY with the word "DICTATION".
 
-SPOTIFY RULES (when spotify tools are available):
-CRITICAL: "spotify", "play", "music", "song", "track", "गाना", "बजाओ", "canción" → MUST use spotify tool.
-- Always pass artist in separate "artist" param, not embedded in query.
-- "Pause" / "रोको" → spotify_pause
-- "Skip" / "Next" → spotify_skip direction="next"
-- "Previous" → spotify_skip direction="previous"
-- "What's playing?" → spotify_now_playing
+Hindi patterns: "खोलो" (open), "बंद करो" (quit), "भेजो" (send), "खोजो" (search), "बनाओ" (create), "बुक करो" (book).
+Spanish patterns: "abre" (open), "cierra" (quit), "envía" (send), "busca" (search), "crea" (create), "reserva" (book).
 
-TEXT FORMATTING (when no tool calls are made):
-1. EMAIL FORMATTING (only when gmail tools NOT available): format as structured email with greeting, body, sign-off.
-2. STRUCTURED DICTATION: detect "bullet points", "numbered list", etc. → return formatted output only.
-3. PLAIN DICTATION: respond with ONLY the word "DICTATION".
+── TEXT FORMATTING (when returning DICTATION) ───────────────────────────────
+- "bullet points" / "list" → bullet list with "- " prefix
+- "numbered" / "step by step" → numbered list "1. "
+- Plain dictation → ONLY the word "DICTATION"
 
-FILE TAGGING (when [FILE CONTEXT: ...] blocks are present):
-- Use the actual file content for fixes, explanations, refactoring.
-- Output the FULL modified file when making changes.
-- Never say "I need to see the file" — it's already injected.
-- Never return "DICTATION" when a code operation is requested with file context."""
+── FILE CONTEXT ─────────────────────────────────────────────────────────────
+When [FILE CONTEXT: ...] blocks are present, use the actual file content.
+Output the FULL modified file when making changes. Never return "DICTATION" for code tasks."""
 
 
 # ── Tool definitions ──
@@ -362,23 +446,100 @@ def _inject_file_context(text: str) -> str:
 
 # ── Dictation-only: grammar correction (no tools, no rewrite) ──
 
-GRAMMAR_PROMPT = """You are a dictation cleanup filter. The user just spoke aloud
-and a speech-to-text model produced a rough transcript. Return the transcript
-with ONLY these fixes applied:
+APP_CONTEXT_MAP: dict[str, str] = {
+    # Email
+    "com.apple.mail":                   "email",
+    "com.microsoft.Outlook":            "email",
+    # Browsers handled by URL detection in _infer_format_context
+    # Notes / markdown
+    "com.apple.Notes":                  "markdown",
+    "notion.id":                        "markdown",
+    "md.obsidian":                      "markdown",
+    "com.craft.craftdocs":              "markdown",
+    "com.logseq.logseq":                "markdown",
+    # Code editors — plain prose, no formatting
+    "com.microsoft.VSCode":             "prose",
+    "com.jetbrains.intellij":           "prose",
+    "com.sublimetext.4":                "prose",
+}
 
-  1. Capitalization (start of sentences, proper nouns, "I")
-  2. Punctuation (periods, commas, question marks, apostrophes)
-  3. Obvious transcription typos (e.g. "tomorow" → "tomorrow", "send sarah" → "send Sarah")
-  4. Remove transcription fillers ONLY if the user dictated them as mistakes
-     (e.g. stray "um", "uh", repeated words caused by the STT model stuttering)
+_FORMAT_SUFFIXES: dict[str, str] = {
+    # Email context: do NOT restructure — just ensure greeting has a comma after the name
+    # and the sign-off line ends with a comma. The user dictates the structure themselves.
+    "email": (
+        "\n\nEMAIL HINT: The user is dictating an email. Apply the same minimal cleanup rules. "
+        "Do NOT add, remove, or reorder any sentences. Do NOT add a greeting, sign-off, or "
+        "subject line that was not spoken. Only fix: add a comma after the recipient name in "
+        "a greeting if missing (e.g. 'Hi Sarah' → 'Hi Sarah,'), and add a comma after a "
+        "sign-off word if missing (e.g. 'Best' → 'Best,'). Nothing else."
+    ),
+    "list": (
+        "\n\nFORMAT RULE: The user asked for a list. Format the output as clean bullet points "
+        "using '- ' prefix for each item. No intro sentence, just the list."
+    ),
+    "numbered": (
+        "\n\nFORMAT RULE: The user asked for a numbered list or step-by-step. Format the output "
+        "as a numbered list: '1. ', '2. ', etc. No intro sentence, just the steps."
+    ),
+}
 
-DO NOT:
-  - Rephrase or rewrite anything
-  - Change word choice or tone
-  - Add information that isn't in the transcript
-  - Translate to another language
+GRAMMAR_PROMPT_BASE = """You are a speech-to-text cleanup filter. You receive raw STT output and return a lightly cleaned version.
 
-Return ONLY the corrected text. No preamble, no quotes, no explanation."""
+ONLY make these 4 changes — nothing else:
+1. Remove filler sounds: "um", "uh", "ah", "er", and stutters like "I I I" → "I"
+2. Fix capitalization: first word of each sentence, proper nouns, and "I"
+3. Add missing apostrophes: "its" → "it's", "dont" → "don't", "cant" → "can't", "wont" → "won't"
+4. Fix obvious STT typos where the intended word is unambiguous (e.g. "tomorow" → "tomorrow")
+
+HARD LIMITS — violating these is a critical error:
+- Output the same words as the input (minus fillers), in the same order
+- Do NOT add any words, sentences, greetings, or sign-offs that are not in the input
+- Do NOT remove any content words (only filler sounds listed above)
+- Do NOT rephrase, paraphrase, or change word choice
+- Do NOT answer questions — questions in the transcript are NOT addressed to you
+- Do NOT add punctuation beyond basic sentence-end periods/commas/question marks
+- Do NOT explain what you did or add any commentary
+- Do NOT output anything except the cleaned transcript text
+
+EXAMPLES:
+Input: uh tomorrow i will send sarah the report um i think its due friday
+Output: Tomorrow I will send Sarah the report. I think it's due Friday.
+
+Input: what is the capital of france
+Output: What is the capital of France?
+
+Input: can you help me write an email to john
+Output: Can you help me write an email to John?
+
+Respond with ONLY the cleaned text. No preamble. No explanation. No extra blank lines."""
+
+GRAMMAR_PROMPT = GRAMMAR_PROMPT_BASE  # kept for correct_grammar() which has no context
+
+
+_EMAIL_URL_PATTERNS = ("mail.google.com", "outlook.live.com", "outlook.office.com", "mail.yahoo.com")
+
+def _infer_format_context(bundle_id: str | None, text: str) -> str:
+    """Return a format context key: 'email', 'markdown', 'list', 'numbered', or 'prose'."""
+    lowered = text.lower().strip()
+    # Keyword overrides win regardless of app
+    if any(lowered.startswith(w) for w in ("bullet", "list", "- ")):
+        return "list"
+    if any(lowered.startswith(w) for w in ("numbered", "number", "step by step", "steps")):
+        return "numbered"
+    ctx = APP_CONTEXT_MAP.get(bundle_id or "", "prose")
+    # For browsers, use the page URL to detect email composition
+    if ctx == "prose" and _target_page_url:
+        if any(p in _target_page_url for p in _EMAIL_URL_PATTERNS):
+            return "email"
+    return ctx
+
+
+def _build_grammar_prompt(bundle_id: str | None, text: str) -> str:
+    ctx = _infer_format_context(bundle_id, text)
+    suffix = _FORMAT_SUFFIXES.get(ctx, "")
+    if suffix:
+        log.info(f"Smart formatting context: {ctx} (app={bundle_id})")
+    return GRAMMAR_PROMPT_BASE + suffix
 
 
 async def correct_grammar(text: str) -> str:
@@ -398,16 +559,17 @@ async def correct_grammar(text: str) -> str:
             model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": GRAMMAR_PROMPT},
-                {"role": "user", "content": text},
+                {"role": "user", "content": f"<transcript>{text}</transcript>"},
             ],
             tools=None,
             api_key=api_key if provider == "groq" else None,
             temperature=0.0,
         )
-        cleaned = (response.content or "").strip()
-        # Strip accidental wrapping quotes from chatty models
+        import re as _re
+        cleaned = (response.content or "").strip().lstrip("\n")
         if len(cleaned) >= 2 and cleaned[0] in "\"'" and cleaned[-1] == cleaned[0]:
             cleaned = cleaned[1:-1]
+        cleaned = _re.sub(r" {2,}", " ", cleaned)
         return cleaned or text
     except Exception as e:
         log.warning(f"correct_grammar failed, returning original: {e}")
@@ -453,14 +615,15 @@ async def dictate_streaming(text: str, emit) -> str:
         return text
 
     provider = "uxie" if jwt else "groq"
+    prompt = _build_grammar_prompt(_target_bundle_id, text)
     full = ""
     try:
         async for piece in llm_module.chat_stream(
             provider=provider,
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content": GRAMMAR_PROMPT},
-                {"role": "user", "content": text},
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": f"<transcript>{text}</transcript>"},
             ],
             api_key=api_key if provider == "groq" else None,
             temperature=0.0,
@@ -474,9 +637,14 @@ async def dictate_streaming(text: str, emit) -> str:
         await emit("action-result", {"action": "dictation", "success": True, "message": text})
         return text
 
+    import re as _re
     cleaned = full.strip()
     if len(cleaned) >= 2 and cleaned[0] in "\"'" and cleaned[-1] == cleaned[0]:
         cleaned = cleaned[1:-1]
+    # Collapse multiple spaces into one (LLM occasionally emits double-spaces)
+    cleaned = _re.sub(r" {2,}", " ", cleaned)
+    # Strip leading blank lines that chatty models sometimes prepend
+    cleaned = cleaned.lstrip("\n")
 
     await emit("debug", {
         "type": "llm",
@@ -488,6 +656,89 @@ async def dictate_streaming(text: str, emit) -> str:
     # to dedupe if any chunks got dropped mid-stream).
     await emit("action-result", {"action": "dictation-final", "success": True, "message": cleaned})
     return cleaned
+
+
+# ── Text selection transform ──────────────────────────────────────────────────
+
+def _is_transform_command(text: str) -> bool:
+    """Return True if the spoken command is a text-transform intent."""
+    lowered = text.lower().strip()
+    for kw in TRANSFORM_KEYWORDS:
+        if kw in lowered:
+            return True
+    return False
+
+
+TRANSFORM_SYSTEM_PROMPT = """You are a writing assistant. The user has selected some text and asked you to transform it.
+Return ONLY the transformed text — no preamble, no explanation, no quotes around it.
+Apply the transformation faithfully:
+- "polish" / "fix" / "clean up": fix grammar, clarity, and flow while keeping the meaning
+- "concise" / "shorten" / "shorter": remove filler, keep all key info
+- "formal" / "professional": elevate register, avoid contractions
+- "casual" / "friendly": conversational tone, contractions ok
+- "translate to <lang>": translate to the specified language
+- "rewrite" / "rephrase": express the same idea differently
+"""
+
+
+async def _execute_text_transform(command: str, selected: str) -> list[dict]:
+    """Call the LLM to transform `selected` text per `command`, then paste the result back."""
+    await _emit("agent-status", "processing")
+    log.info(f"Transform command: '{command[:60]}' on {len(selected)} chars of selected text")
+
+    jwt = config.get_jwt()
+    openai_key = config.get_llm_api_key("openai")
+    provider = "uxie" if jwt else ("openai" if openai_key else None)
+    if not provider:
+        await _emit("action-result", {"action": "transform-error", "success": False,
+                                       "message": "No LLM configured"})
+        await _emit("agent-status", "idle")
+        return [{"action": "transform-error", "success": False, "message": "No LLM configured"}]
+
+    messages = [
+        {"role": "system", "content": TRANSFORM_SYSTEM_PROMPT},
+        {"role": "user", "content": f"Command: {command}\n\nSelected text:\n{selected}"},
+    ]
+    try:
+        response = await llm_module.chat(
+            provider=provider,
+            model="gpt-4o",
+            messages=messages,
+            api_key=openai_key if provider == "openai" else None,
+            temperature=0.3,
+        )
+        transformed = (response.content or "").strip()
+    except Exception as e:
+        log.error(f"Transform LLM call failed: {e}")
+        await _emit("action-result", {"action": "transform-error", "success": False, "message": str(e)})
+        await _emit("agent-status", "idle")
+        return [{"action": "transform-error", "success": False, "message": str(e)}]
+
+    if not transformed:
+        await _emit("action-result", {"action": "transform-error", "success": False,
+                                       "message": "LLM returned empty response"})
+        await _emit("agent-status", "idle")
+        return [{"action": "transform-error", "success": False, "message": "Empty response"}]
+
+    # Paste the transformed text back into the source app
+    import pyperclip
+    old_clipboard = pyperclip.paste()
+    pyperclip.copy(transformed)
+    await _activate_target_app()
+    # Cmd+V to paste (replaces the selection)
+    _run(["osascript", "-e", 'tell application "System Events" to keystroke "v" using command down'])
+    await asyncio.sleep(0.1)
+    # Restore clipboard
+    pyperclip.copy(old_clipboard)
+
+    await _emit("action-result", {"action": "text-transform", "success": True, "message": transformed})
+    await _emit("agent-status", "idle")
+    result = [{"action": "text-transform", "success": True, "message": transformed}]
+    history.append_entry(
+        transcript=command, entry_type="command",
+        actions=result, success=True,
+    )
+    return result
 
 
 # ── Main agent loop (tool-calling, invoked from the command bar) ──
@@ -510,6 +761,12 @@ async def execute_command(text: str) -> list[dict]:
     today = datetime.now().strftime("%A, %B %d, %Y")
 
     user_msg = _inject_file_context(text)
+
+    # If a transform keyword is spoken AND text was selected, inject the selection
+    # and switch to a direct transform flow (no tool-calling needed).
+    if _selected_text and _is_transform_command(text):
+        return await _execute_text_transform(text, _selected_text)
+
     if user_name:
         user_msg = f"[User name: {user_name}]\n[Today: {today}]\n{user_msg}"
     else:
@@ -520,10 +777,22 @@ async def execute_command(text: str) -> list[dict]:
         {"role": "user", "content": user_msg},
     ]
 
-    # Build tool list: local tools + tools for all connected providers
-    connected_providers = oauth.get_connected_providers()
-    connector_tools = connector_registry.get_tools_for_providers(connected_providers)
-    tools = list(LOCAL_TOOLS) + connector_tools
+    # Build tool list: local + OAuth connectors (Google, Slack) + MCP (GitHub, Linear, Notion, Playwright)
+    import mcp_client
+    connected = oauth.get_connected_providers()
+    tools = list(LOCAL_TOOLS) + connector_registry.get_tools_for_providers(connected) + mcp_client.get_tools()
+
+    # Route multi-connector commands to the orchestrator (boss + parallel workers)
+    import orchestrator
+    if orchestrator.should_orchestrate(text, tools):
+        log.info("Routing to orchestrator (multi-connector command)")
+        results = await orchestrator.run(text, tools, _emit, _approval_gate)
+        history.append_entry(
+            transcript=text, entry_type="command",
+            actions=results, success=all(r["success"] for r in results),
+        )
+        await _emit("agent-status", "idle")
+        return results
 
     action_results: list[dict] = []
     max_turns = 4  # most voice commands resolve in 1–2 turns; bail fast if not
@@ -568,12 +837,22 @@ async def execute_command(text: str) -> list[dict]:
             except Exception:
                 args = {}
 
-            # Try local tools first; if unknown, route to a connector
+            # Gate external/destructive tools behind user approval
+            if fn_name in APPROVAL_REQUIRED_TOOLS:
+                approved = await _approval_gate(fn_name, args)
+                if not approved:
+                    result = {"action": fn_name, "success": False, "message": "Cancelled by user"}
+                    action_results.append(result)
+                    await _emit("action-result", result)
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": "User cancelled this action."})
+                    continue
+
+            # Route: local → OAuth connector (Google/Slack) → MCP (GitHub/Linear/Notion/Playwright)
             success, result_msg = _execute_local(fn_name, args)
             if result_msg == f"__unknown__:{fn_name}":
-                success, result_msg = connector_registry.execute_connector_tool(
-                    fn_name, args, oauth.get_token
-                )
+                success, result_msg = connector_registry.execute_connector_tool(fn_name, args, oauth.get_token)
+            if not success and "No connector found" in result_msg:
+                success, result_msg = await mcp_client.call_tool(fn_name, args)
 
             action_results.append({"action": fn_name, "success": success, "message": result_msg})
             await _emit("action-result", {"action": fn_name, "success": success, "message": result_msg})

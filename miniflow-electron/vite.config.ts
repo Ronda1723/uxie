@@ -15,6 +15,12 @@ export default defineConfig({
     outDir: path.resolve(__dirname, "build/renderer"),
     emptyOutDir: true,
     target: "es2022",
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, "src/renderer/index.html"),
+        overlay: path.resolve(__dirname, "src/renderer/overlay.html"),
+      },
+    },
   },
   server: {
     port: 5174,

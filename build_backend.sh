@@ -44,20 +44,16 @@ cd "$ENGINE_DIR"
   --hidden-import "uvicorn.lifespan.on" \
   --hidden-import "uvicorn.protocols.http.auto" \
   --hidden-import "uvicorn.protocols.websockets.auto" \
-  --hidden-import "connectors.google" \
-  --hidden-import "connectors.slack" \
-  --hidden-import "connectors.discord" \
-  --hidden-import "connectors.github" \
-  --hidden-import "connectors.jira" \
-  --hidden-import "connectors.linear" \
-  --hidden-import "connectors.notion" \
-  --hidden-import "connectors.spotify" \
+  --hidden-import "mcp" \
+  --hidden-import "mcp.client.stdio" \
+  --hidden-import "mcp.types" \
   --hidden-import "connectors.registry" \
   --collect-all "pyobjc_framework_Quartz" \
   --collect-all "pyobjc_framework_AppKit" \
   --collect-all "tiktoken" \
   --collect-all "tiktoken_ext" \
   --collect-all "litellm" \
+  --collect-all "mcp" \
   --hidden-import "tiktoken_ext" \
   --hidden-import "tiktoken_ext.openai_public" \
   --noconfirm \

@@ -1,6 +1,6 @@
-appId: ai.smallest.miniflow
-productName: MiniFlow
-copyright: Copyright © 2026 MiniFlow
+appId: ai.smallest.uxie
+productName: Uxie
+copyright: Copyright © 2026 Uxie
 directories:
   buildResources: resources
   output: dist
@@ -35,8 +35,8 @@ mac:
   entitlements: resources/entitlements.mac.plist
   entitlementsInherit: resources/entitlements.mac.plist
   extendInfo:
-    NSMicrophoneUsageDescription: "MiniFlow needs microphone access for voice commands."
-    NSAccessibilityUsageDescription: "MiniFlow types dictated text into the focused app."
+    NSMicrophoneUsageDescription: "Uxie needs microphone access for voice commands."
+    NSAccessibilityUsageDescription: "Uxie types dictated text into the focused app."
     LSUIElement: true # menu-bar only, no dock icon
 
 dmg:

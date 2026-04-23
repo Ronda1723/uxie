@@ -1,0 +1,75 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14  # Apple Silicon (arm64)
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: native-helper/target
+          key: rust-${{ runner.os }}-${{ hashFiles('native-helper/Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-
+
+      - name: Cache Python venv
+        uses: actions/cache@v4
+        with:
+          path: miniflow-engine/venv
+          key: venv-${{ runner.os }}-${{ hashFiles('miniflow-engine/requirements.txt') }}
+          restore-keys: venv-${{ runner.os }}-
+
+      - name: Cache Node modules
+        uses: actions/cache@v4
+        with:
+          path: miniflow-electron/node_modules
+          key: node-${{ runner.os }}-${{ hashFiles('miniflow-electron/package-lock.json') }}
+          restore-keys: node-${{ runner.os }}-
+
+      - name: Create Python venv & install deps
+        run: |
+          cd miniflow-engine
+          python3 -m venv venv
+          venv/bin/pip install --upgrade pip
+          venv/bin/pip install -r requirements.txt
+
+      - name: Build (backend + helper + Electron DMG)
+        run: bash build_electron.sh
+
+      - name: Get version
+        id: ver
+        run: |
+          VERSION=$(node -p "require('./miniflow-electron/package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiniFlow-${{ steps.ver.outputs.version }}-arm64
+          path: miniflow-electron/dist/MiniFlow-${{ steps.ver.outputs.version }}-arm64.dmg
+          if-no-files-found: error
+          retention-days: 14

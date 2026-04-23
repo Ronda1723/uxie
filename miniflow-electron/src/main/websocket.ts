@@ -6,6 +6,7 @@ import { EventEmitter } from "events";
 
 import { WS_URL } from "./api";
 import { IpcChannels } from "../shared/types";
+import { showOverlay, hideOverlay, createOverlayWindow } from "./overlayWindow";
 
 let ws: WebSocket | null = null;
 let getWindows: (() => BrowserWindow[]) = () => [];
@@ -42,6 +43,10 @@ export function connectWs(): void {
       // Fall through so the renderer can still surface it in the UI preview.
     }
 
+    // Floating overlay: show on approval-needed, hide on resolved/result
+    if (msg.event === "approval-needed") showOverlay();
+    if (msg.event === "approval-resolved") hideOverlay();
+
     forwardToRenderer(msg.event, msg.payload);
   });
 }
@@ -56,6 +61,8 @@ function forwardToRenderer(event: string, payload: unknown): void {
     event === "transcription-error" ? "voice:transcription-error" :
     event === "oauth-connected"     ? "oauth:connected" :
     event === "debug"               ? "debug:event" :
+    event === "approval-needed"     ? "agent:approval-needed" :
+    event === "approval-resolved"   ? "agent:approval-resolved" :
     null;
   if (!channel) return;
   // Broadcast to every live BrowserWindow exactly ONCE. We used to also loop

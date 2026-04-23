@@ -28,6 +28,10 @@ miniflow-engine/venv/
 *.log
 *.pid
 llm_keys.json
+miniflow_keys.json
+connectors.json
+uxie_auth.json
+uxie-backend/.venv/
 hotkey.json
 dictionary.json
 snippets.json

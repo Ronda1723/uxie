@@ -33,6 +33,7 @@ import { connectWs, setWindowProvider } from "./websocket";
 import { registerIpc } from "./ipc";
 import { invoke } from "./api";
 import { IpcChannels } from "../shared/types";
+import { createOverlayWindow } from "./overlayWindow";
 
 // macOS: hide from dock (also enforced by LSUIElement in Info.plist).
 app.dock?.hide();
@@ -56,6 +57,9 @@ app.whenReady().then(async () => {
     return w ? [w] : [];
   });
 
+  // Pre-create the overlay window so it's ready to slide in instantly
+  createOverlayWindow();
+
   connectWs();
   registerIpc();
 
@@ -69,8 +73,18 @@ app.whenReady().then(async () => {
 
   // Broadcast start/stop to the popover window; the renderer owns the mic.
   function onPress(mode: "dictation" | "command") {
+    // Capture bundle ID FIRST — before broadcast which may steal focus
+    let bundleID: string | null = null;
+    try {
+      const { execSync } = require("node:child_process");
+      bundleID = execSync(
+        `osascript -e 'tell application "System Events" to get bundle identifier of (first process whose frontmost is true)'`,
+        { timeout: 500, encoding: "utf8" }
+      ).trim() || null;
+    } catch {}
+    console.log("[hotkey] bundleID:", bundleID);
     broadcast(IpcChannels.startCapture, { mode });
-    invoke("start_listening", { sampleRate: 16000, mode }).catch((e) =>
+    invoke("start_listening", { sampleRate: 16000, mode, bundleID }).catch((e) =>
       console.error("start_listening failed:", e)
     );
   }

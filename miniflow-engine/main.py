@@ -59,6 +59,7 @@ import styles
 import oauth
 import llm as llm_module
 import hotkey as hotkey_module
+import mcp_client
 from connectors import registry
 
 import pathlib
@@ -106,11 +107,14 @@ async def lifespan(app: FastAPI):
     audio.set_event_broadcaster(manager.broadcast)
     dictation.set_event_broadcaster(manager.broadcast)
     agent.set_event_broadcaster(manager.broadcast)
+    # Start MCP servers (Playwright always-on + any with saved credentials)
+    asyncio.create_task(mcp_client.start())
     # Warm up litellm in the background so the first real LLM call doesn't
     # pay for module init + cost-map load.
     asyncio.create_task(_warm_litellm())
     yield
     log.info("MiniFlow engine shutting down")
+    await mcp_client.stop()
 
 
 async def _warm_litellm():
@@ -140,7 +144,198 @@ app.add_middleware(
 async def health():
     return {"status": "ok"}
 
-# ── OAuth callback (receives token from Vercel proxy) ──
+# ── Debug monitor ──
+
+_DEBUG_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Uxie — Live Debug Monitor</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;
+       background:#0d1117;color:#e6edf3;min-height:100vh;padding:20px}
+  h1{font-size:16px;font-weight:600;color:#58a6ff;margin-bottom:4px}
+  .sub{font-size:12px;color:#8b949e;margin-bottom:16px}
+  #status{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;
+          background:#21262d;color:#8b949e;margin-bottom:16px}
+  #status.live{background:#0d3321;color:#3fb950}
+  .controls{display:flex;gap:8px;margin-bottom:16px;align-items:center}
+  button{background:#21262d;border:1px solid #30363d;color:#e6edf3;
+         padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px}
+  button:hover{background:#30363d}
+  #log{display:flex;flex-direction:column;gap:6px}
+  .entry{border-radius:8px;padding:10px 14px;border:1px solid #21262d;
+         font-size:12px;line-height:1.5}
+  .entry.stt{border-color:#1f4068;background:#0d1f35}
+  .entry.llm{border-color:#1a3a1a;background:#0d1f0d}
+  .entry.status{border-color:#2d2a1e;background:#1a1a0f}
+  .entry.other{border-color:#21262d;background:#161b22}
+  .entry.approval{border-color:#4a1f1f;background:#2a0f0f}
+  .tag{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+       margin-bottom:4px;display:flex;justify-content:space-between}
+  .tag .label{color:#8b949e}
+  .entry.stt .tag .label{color:#58a6ff}
+  .entry.llm .tag .label{color:#3fb950}
+  .entry.approval .tag .label{color:#f85149}
+  .time{color:#484f58;font-size:10px}
+  .text{color:#e6edf3;white-space:pre-wrap;word-break:break-word}
+  .entry.stt .text{color:#a5d6ff}
+  .entry.llm .text{color:#7ee787}
+  .diff-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px}
+  .diff-col{}
+  .diff-label{font-size:10px;font-weight:600;text-transform:uppercase;
+              letter-spacing:.06em;color:#8b949e;margin-bottom:3px}
+  .diff-col.stt-col .diff-label{color:#58a6ff}
+  .diff-col.llm-col .diff-label{color:#3fb950}
+  .diff-col .text{font-size:12px}
+  .entry.pair{border-color:#2a3a2a;background:#111a11}
+  .empty{color:#484f58;text-align:center;padding:40px;font-size:13px}
+</style>
+</head>
+<body>
+<h1>Uxie — Live Debug Monitor</h1>
+<div class="sub">Real-time view of STT → LLM pipeline. Open at <strong>http://localhost:8765/debug</strong> while Uxie is running.</div>
+<span id="status">● connecting…</span>
+<div class="controls">
+  <button onclick="clearLog()">Clear</button>
+  <label style="font-size:12px;color:#8b949e">
+    <input type="checkbox" id="pairMode" checked style="margin-right:4px">
+    Show STT + LLM side by side
+  </label>
+</div>
+<div id="log"><div class="empty">No events yet — start dictating or run a command in Uxie.</div></div>
+
+<script>
+const log = document.getElementById('log');
+const statusEl = document.getElementById('status');
+let pendingStt = null;   // holds latest STT entry waiting for matching LLM
+
+function ts() {
+  const d = new Date();
+  return d.toTimeString().slice(0,8) + '.' + String(d.getMilliseconds()).padStart(3,'0');
+}
+
+function clearLog() {
+  log.innerHTML = '<div class="empty">Log cleared.</div>';
+  pendingStt = null;
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function prepend(html) {
+  const empty = log.querySelector('.empty');
+  if (empty) empty.remove();
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  log.insertBefore(div.firstChild, log.firstChild);
+}
+
+function handleEvent(ev, payload) {
+  const t = ts();
+  const pair = document.getElementById('pairMode').checked;
+
+  if (ev === 'debug') {
+    if (payload.type === 'stt') {
+      pendingStt = { text: payload.text, app: payload.app, t };
+      if (!pair) {
+        prepend(`<div class="entry stt">
+          <div class="tag"><span class="label">STT — Heard</span><span class="time">${t} · ${esc(payload.app)}</span></div>
+          <div class="text">${esc(payload.text)}</div>
+        </div>`);
+      }
+    } else if (payload.type === 'llm') {
+      if (pair && pendingStt) {
+        prepend(`<div class="entry pair">
+          <div class="tag"><span class="label">STT → LLM</span><span class="time">${t} · ${esc(payload.app)}</span></div>
+          <div class="diff-row">
+            <div class="diff-col stt-col">
+              <div class="diff-label">Heard (raw STT)</div>
+              <div class="text">${esc(pendingStt.text)}</div>
+            </div>
+            <div class="diff-col llm-col">
+              <div class="diff-label">Typed (LLM cleaned)</div>
+              <div class="text">${esc(payload.text)}</div>
+            </div>
+          </div>
+        </div>`);
+        pendingStt = null;
+      } else {
+        prepend(`<div class="entry llm">
+          <div class="tag"><span class="label">LLM — Typed</span><span class="time">${t} · ${esc(payload.app)}</span></div>
+          <div class="text">${esc(payload.text)}</div>
+        </div>`);
+      }
+    }
+    return;
+  }
+
+  if (ev === 'agent-status') {
+    prepend(`<div class="entry status">
+      <div class="tag"><span class="label">Agent status</span><span class="time">${t}</span></div>
+      <div class="text">${esc(payload)}</div>
+    </div>`);
+    return;
+  }
+
+  if (ev === 'approval-needed') {
+    prepend(`<div class="entry approval">
+      <div class="tag"><span class="label">Approval needed — ${esc(payload.tool)}</span><span class="time">${t}</span></div>
+      <div class="text">${esc(payload.summary)}\\n\\nParams: ${esc(JSON.stringify(payload.params, null, 2))}</div>
+    </div>`);
+    return;
+  }
+
+  if (ev === 'action-result') {
+    const action = payload?.action ?? ev;
+    if (action === 'dictation-final' || action === 'dictation') return; // covered by LLM debug
+    prepend(`<div class="entry other">
+      <div class="tag"><span class="label">Action: ${esc(action)}</span><span class="time">${t}</span></div>
+      <div class="text">${esc(payload?.message ?? JSON.stringify(payload))}</div>
+    </div>`);
+    return;
+  }
+
+  if (ev === 'transcription') {
+    prepend(`<div class="entry stt">
+      <div class="tag"><span class="label">Transcription (command)</span><span class="time">${t}</span></div>
+      <div class="text">${esc(payload?.transcript ?? '')}</div>
+    </div>`);
+    return;
+  }
+}
+
+function connect() {
+  const ws = new WebSocket('ws://localhost:8765/ws');
+  ws.onopen = () => {
+    statusEl.textContent = '● live';
+    statusEl.className = 'live';
+  };
+  ws.onclose = () => {
+    statusEl.textContent = '● disconnected — retrying…';
+    statusEl.className = '';
+    setTimeout(connect, 2000);
+  };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      handleEvent(msg.event, msg.payload);
+    } catch {}
+  };
+}
+connect();
+</script>
+</body>
+</html>"""
+
+@app.get("/debug")
+async def debug_monitor():
+    return HTMLResponse(_DEBUG_HTML)
+
+# ── OAuth callback (local loopback — Google/Slack redirect here directly) ──
 
 _SUCCESS_HTML = """
 <!DOCTYPE html>
@@ -179,21 +374,14 @@ _FAIL_HTML = """
 """
 
 @app.get("/callback")
-async def oauth_callback(data: str = "", state: str = ""):
-    if not data:
-        return HTMLResponse(_FAIL_HTML.format(error="No token data received."), status_code=400)
+async def oauth_callback(code: str = "", state: str = "", error: str = "", error_description: str = ""):
+    if error:
+        log.error(f"OAuth error from provider: {error} — {error_description}")
+        return HTMLResponse(_FAIL_HTML.format(error=error_description or error), status_code=400)
+    if not code or not state:
+        return HTMLResponse(_FAIL_HTML.format(error="Missing code or state."), status_code=400)
     try:
-        # The Vercel proxy encodes the payload as base64url JSON
-        # (or AES-256-GCM if ENCRYPTION_KEY is set on Vercel — we support plain only)
-        padding = 4 - len(data) % 4
-        padded = data + ("=" * (padding % 4))
-        raw = base64.urlsafe_b64decode(padded).decode("utf-8")
-        payload = json.loads(raw)
-        provider = payload.get("provider")
-        if not provider:
-            raise ValueError("Missing provider in token payload")
-        oauth.save_token(provider, payload)
-        log.info(f"OAuth token saved for: {provider}")
+        provider = await oauth.handle_callback(code, state)
         await manager.broadcast("oauth-connected", {"provider": provider})
         return HTMLResponse(_SUCCESS_HTML)
     except Exception as e:
@@ -275,6 +463,23 @@ async def _get_user_status():
     return data
 
 
+async def _mcp_connect_server(server_id: str, credentials: dict):
+    """Save all credentials for a server then restart it."""
+    for key, value in credentials.items():
+        mcp_client.set_credential(server_id, key, value)
+    await mcp_client.get_manager().restart_server(server_id)
+    return {"ok": True, "status": mcp_client.get_server_status()}
+
+
+async def _mcp_disconnect_server(server_id: str):
+    """Clear credentials and stop the server."""
+    creds = mcp_client.get_credentials()
+    creds.pop(server_id, None)
+    mcp_client.save_credentials(creds)
+    await mcp_client.get_manager().restart_server(server_id)
+    return {"ok": True}
+
+
 @app.post("/invoke/{command}")
 async def invoke(command: str, body: dict = {}):
     handlers = {
@@ -341,6 +546,12 @@ async def invoke(command: str, body: dict = {}):
         "get_user_status":       lambda b: _get_user_status(),
         "logout_uxie":           lambda b: config.clear_jwt(),
         "get_uxie_user":         lambda b: config.get_uxie_user(),
+        # Approval widget
+        "resolve_approval":      lambda b: agent.resolve_approval(bool(b.get("approved", False))),
+        # MCP connector management
+        "mcp_get_status":        lambda b: mcp_client.get_server_status(),
+        "mcp_connect_server":    lambda b: _mcp_connect_server(b["server_id"], b.get("credentials", {})),
+        "mcp_disconnect_server": lambda b: _mcp_disconnect_server(b["server_id"]),
         # App
         "open_settings":         lambda b: None,
     }

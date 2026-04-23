@@ -44,6 +44,8 @@ _final_fragments: list[str] = []  # accumulates per-utterance finals from Waves
 _last_seen_received: asyncio.Event | None = None
 _receive_task: asyncio.Task | None = None
 _cached_waves_token: str | None = None  # cached for the app session lifetime
+_chunk_queue: list[bytes] = []  # buffers chunks received before Waves connects
+_connecting: bool = False
 
 
 def set_event_broadcaster(fn: Callable):
@@ -86,13 +88,21 @@ async def _fetch_stt_token() -> str | None:
 
 async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
     global _waves_ws, _sample_rate, _final_fragments, _session_active, _session_mode
-    global _last_seen_received, _receive_task
+    global _last_seen_received, _receive_task, _chunk_queue, _connecting
     _sample_rate = sample_rate
     _final_fragments = []
+    _chunk_queue = []
+    _connecting = True
     _session_active = True
     _session_mode = mode if mode in ("dictation", "command") else "dictation"
     _last_seen_received = asyncio.Event()
     log.info(f"Starting listening session: mode={_session_mode}")
+
+    # Capture selected text NOW (before the Waves socket opens) so transform
+    # commands ("polish this", "make this concise") have the selection available.
+    if _session_mode == "command":
+        import agent as _agent
+        _agent.capture_selected_text()
 
     # Try Uxie backend token first; fall back to locally-stored master key
     key = await _fetch_stt_token()
@@ -100,6 +110,7 @@ async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
         try:
             key = config.get_smallest_key()
         except ValueError as e:
+            _connecting = False
             await _emit("transcription-error", str(e))
             return
 
@@ -116,16 +127,34 @@ async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
         )
     except Exception as e:
         log.error(f"Waves connect failed: {e}")
+        _connecting = False
         await _emit("transcription-error", f"Could not connect to Smallest AI Waves: {e}")
         return
+
+    # Flush any chunks that arrived while we were connecting
+    if _chunk_queue:
+        log.info(f"Flushing {len(_chunk_queue)} queued chunks to Waves")
+        for queued in _chunk_queue:
+            try:
+                await _waves_ws.send(queued)
+            except Exception as e:
+                log.error(f"flush queued chunk: {e}")
+                break
+        _chunk_queue.clear()
+    _connecting = False
+
     _receive_task = asyncio.create_task(_receive_transcripts())
     log.info(f"Waves connected (sample_rate={sample_rate})")
 
 
 async def send_audio_chunk(chunk: str):
+    decoded = base64.b64decode(chunk)
+    if _connecting:
+        _chunk_queue.append(decoded)
+        return
     if _waves_ws:
         try:
-            await _waves_ws.send(base64.b64decode(chunk))
+            await _waves_ws.send(decoded)
         except Exception as e:
             log.error(f"send_audio_chunk: {e}")
 
@@ -179,10 +208,11 @@ async def stop_listening():
         "app": _agent._target_bundle_id or "unknown",
     })
 
-    # Apply user dictionary (word substitutions) + snippets (trigger → expansion)
-    # BEFORE the LLM pass so streaming grammar correction works on the already-
-    # expanded text. No-op if both are empty.
-    import dictionary, snippets
+    # Apply symbol normalization (email/URL spoken words → symbols),
+    # then user dictionary substitutions, then snippet expansions —
+    # all BEFORE the LLM pass so grammar correction sees clean text.
+    import normalize, dictionary, snippets
+    raw_text = normalize.apply(raw_text)
     raw_text = dictionary.apply(raw_text)
     raw_text = snippets.apply(raw_text)
 

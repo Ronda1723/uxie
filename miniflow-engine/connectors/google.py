@@ -114,10 +114,14 @@ TOOLS = GMAIL_TOOLS + CALENDAR_TOOLS + DRIVE_TOOLS
 
 def _creds(token: dict):
     from google.oauth2.credentials import Credentials
+    import oauth as _oauth
+    cfg = _oauth.PROVIDERS["google"]
     return Credentials(
         token=token["access_token"],
         refresh_token=token.get("refresh_token") or None,
         token_uri="https://oauth2.googleapis.com/token",
+        client_id=cfg["client_id"],
+        client_secret=cfg["client_secret"],
     )
 
 

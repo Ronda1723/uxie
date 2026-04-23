@@ -107,6 +107,24 @@ const api = {
   getUxieUser:    () => ipcRenderer.invoke(CH.getUxieUser),
   logout:         () => ipcRenderer.invoke(CH.logout),
 
+  // Approval widget
+  onApprovalNeeded: (cb: (e: { tool: string; summary: string; params: Record<string, unknown> }) => void) =>
+    listen("agent:approval-needed", cb),
+  sendApproval: (approved: boolean) =>
+    ipcRenderer.invoke("agent:resolve-approval", approved),
+
+  // MCP connector management
+  getMCPStatus:        () => ipcRenderer.invoke("mcp:getStatus"),
+  connectMCPServer:    (serverId: string, credentials: Record<string, string>) =>
+    ipcRenderer.invoke("mcp:connectServer", serverId, credentials),
+  disconnectMCPServer: (serverId: string) => ipcRenderer.invoke("mcp:disconnectServer", serverId),
+
+  // OAuth connectors (Google, Slack)
+  getConnectedProviders: () => ipcRenderer.invoke("oauth:getConnected"),
+  startOAuth:            (provider: string) => ipcRenderer.invoke("oauth:start", provider),
+  disconnectProvider:    (provider: string) => ipcRenderer.invoke("oauth:disconnect", provider),
+  onOAuthConnected:      (cb: (provider: string) => void) => listen<string>("oauth:connected", cb),
+
   // App
   openExternal:   (url: string) => ipcRenderer.invoke(CH.openExternal, url),
   quit:           () => ipcRenderer.invoke(CH.quit),

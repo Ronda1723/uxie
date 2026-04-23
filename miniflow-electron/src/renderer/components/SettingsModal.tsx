@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { HotkeySettings } from "./HotkeyRecorder";
 
-type SettingsTab = "account" | "hotkey";
+type SettingsTab = "account" | "hotkey" | "connectors";
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<SettingsTab>("account");
@@ -11,13 +11,15 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       <div className="modal" role="dialog" aria-modal="true">
         <div className="modal-header">
           <span className="modal-title">Settings</span>
-          <button className={`modal-tab ${tab === "account" ? "active" : ""}`} onClick={() => setTab("account")}>Account</button>
-          <button className={`modal-tab ${tab === "hotkey"  ? "active" : ""}`} onClick={() => setTab("hotkey")}>Hotkey</button>
+          <button className={`modal-tab ${tab === "account"    ? "active" : ""}`} onClick={() => setTab("account")}>Account</button>
+          <button className={`modal-tab ${tab === "connectors" ? "active" : ""}`} onClick={() => setTab("connectors")}>Connectors</button>
+          <button className={`modal-tab ${tab === "hotkey"     ? "active" : ""}`} onClick={() => setTab("hotkey")}>Hotkey</button>
           <button className="modal-close" onClick={onClose} aria-label="Close">✕</button>
         </div>
         <div className="modal-body">
-          {tab === "account" && <AccountTab />}
-          {tab === "hotkey"  && <HotkeySettings />}
+          {tab === "account"    && <AccountTab />}
+          {tab === "connectors" && <ConnectorsTab />}
+          {tab === "hotkey"     && <HotkeySettings />}
         </div>
       </div>
     </div>
@@ -134,6 +136,208 @@ function AccountTab() {
         <button className="btn-secondary" onClick={logout} disabled={loggingOut}>
           {loggingOut ? "Signing out…" : "Sign out"}
         </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Connectors tab ────────────────────────────────────────────────────────────
+
+const OAUTH_PROVIDERS = [
+  { id: "google", icon: "🔵", label: "Google", hint: "Gmail + Google Calendar via your Google account" },
+  { id: "slack",  icon: "💬", label: "Slack",  hint: "Post messages, read channels, summarize threads" },
+];
+
+const MCP_META: Record<string, { icon: string; label: string; hint: string; keyLabel: string }> = {
+  github: { icon: "🐙", label: "GitHub",  hint: "Create issues, PRs, search repos",   keyLabel: "Personal Access Token" },
+  linear: { icon: "🔷", label: "Linear",  hint: "Create and update issues via voice",  keyLabel: "API Key" },
+  notion: { icon: "📝", label: "Notion",  hint: "Search and create pages",             keyLabel: "Integration Token" },
+};
+
+interface MCPServerStatus {
+  id: string; display: string; always_on: boolean;
+  env_keys: string[]; configured: boolean; running: boolean;
+}
+
+function ConnectorsTab() {
+  const [connected, setConnected] = useState<string[]>([]);
+  const [servers, setServers] = useState<MCPServerStatus[]>([]);
+  const [inputs, setInputs] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
+
+  const mf = window.miniflow as any;
+
+  async function loadStatus() {
+    try {
+      const [providers, mcpList] = await Promise.all([
+        mf.getConnectedProviders?.() as string[],
+        mf.getMCPStatus?.() as MCPServerStatus[],
+      ]);
+      if (providers) setConnected(providers);
+      if (mcpList) setServers(mcpList.filter((s: MCPServerStatus) => !s.always_on));
+    } catch {}
+  }
+
+  useEffect(() => {
+    loadStatus();
+    const unsub = mf.onOAuthConnected?.((provider: string) => {
+      setConnected((prev) => prev.includes(provider) ? prev : [...prev, provider]);
+    });
+    return () => { try { unsub?.(); } catch {} };
+  }, []);
+
+  async function oauthConnect(provider: string) {
+    setBusy(provider);
+    try {
+      await mf.startOAuth?.(provider);
+      // Connection is confirmed by the onOAuthConnected event
+    } catch (e: any) {
+      alert(`Failed to start OAuth: ${e?.message ?? e}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function oauthDisconnect(provider: string) {
+    setBusy(provider);
+    try {
+      await mf.disconnectProvider?.(provider);
+      setConnected((prev) => prev.filter((p) => p !== provider));
+    } catch (e: any) {
+      alert(`Failed to disconnect: ${e?.message ?? e}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function mcpConnect(serverId: string, envKey: string) {
+    const value = inputs[serverId]?.trim();
+    if (!value) return;
+    setBusy(serverId);
+    try {
+      const result = await mf.connectMCPServer?.(serverId, { [envKey]: value });
+      if (result?.status) setServers((result.status as MCPServerStatus[]).filter((s: MCPServerStatus) => !s.always_on));
+      setSaved(serverId);
+      setTimeout(() => setSaved(null), 2500);
+    } catch (e: any) {
+      alert(`Failed: ${e?.message ?? e}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function mcpDisconnect(serverId: string) {
+    setBusy(serverId);
+    try {
+      await mf.disconnectMCPServer?.(serverId);
+      await loadStatus();
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="settings-section">
+      {/* ── OAuth accounts (Google, Slack) ── */}
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>
+          Connected accounts
+        </div>
+        <p style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10 }}>
+          Sign in with your account — Uxie uses Gmail, Calendar, and Slack tools directly.
+        </p>
+        {OAUTH_PROVIDERS.map(({ id, icon, label, hint }) => {
+          const isConnected = connected.includes(id);
+          const isBusy = busy === id;
+          return (
+            <div key={id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: "1px solid var(--fn-card-border)" }}>
+              <span style={{ fontSize: 18, width: 24, textAlign: "center" }}>{icon}</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 500 }}>{label}</div>
+                <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{hint}</div>
+                {isConnected && <div style={{ fontSize: 11, color: "#10b981", marginTop: 2 }}>Connected ✓</div>}
+              </div>
+              {isConnected ? (
+                <button className="btn-secondary" onClick={() => oauthDisconnect(id)} disabled={isBusy}
+                  style={{ fontSize: 12, padding: "4px 10px" }}>
+                  {isBusy ? "…" : "Disconnect"}
+                </button>
+              ) : (
+                <button className="btn-primary" onClick={() => oauthConnect(id)} disabled={isBusy}
+                  style={{ fontSize: 12, padding: "4px 12px" }}>
+                  {isBusy ? "…" : "Connect"}
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── API connectors (GitHub, Linear, Notion via MCP) ── */}
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>
+          API connectors
+        </div>
+        <p style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10 }}>
+          Paste one token to connect. Stored locally on your Mac, never sent to our servers.
+        </p>
+        {servers.filter((s) => MCP_META[s.id]).map((srv) => {
+          const meta = MCP_META[srv.id];
+          const envKey = srv.env_keys[0];
+          const isBusy = busy === srv.id;
+          const wasSaved = saved === srv.id;
+          return (
+            <div key={srv.id} style={{ padding: "12px 0", borderBottom: "1px solid var(--fn-card-border)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: srv.running ? 0 : 8 }}>
+                <span style={{ fontSize: 18, width: 24, textAlign: "center" }}>{meta.icon}</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500 }}>{meta.label}</div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{meta.hint}</div>
+                  {srv.running && <div style={{ fontSize: 11, color: "#10b981", marginTop: 2 }}>Connected ✓</div>}
+                </div>
+                {srv.running && (
+                  <button className="btn-secondary" onClick={() => mcpDisconnect(srv.id)} disabled={isBusy}
+                    style={{ fontSize: 12, padding: "4px 10px" }}>
+                    {isBusy ? "…" : "Disconnect"}
+                  </button>
+                )}
+              </div>
+              {!srv.running && (
+                <div style={{ display: "flex", gap: 8, paddingLeft: 34 }}>
+                  <input
+                    type="password"
+                    placeholder={meta.keyLabel}
+                    value={inputs[srv.id] ?? ""}
+                    onChange={(e) => setInputs((p) => ({ ...p, [srv.id]: e.target.value }))}
+                    style={{ flex: 1, fontSize: 12 }}
+                    onKeyDown={(e) => { if (e.key === "Enter") mcpConnect(srv.id, envKey); }}
+                  />
+                  <button className="btn-primary" onClick={() => mcpConnect(srv.id, envKey)}
+                    disabled={isBusy || !inputs[srv.id]?.trim()}
+                    style={{ fontSize: 12, padding: "4px 12px", whiteSpace: "nowrap" }}>
+                    {isBusy ? "…" : wasSaved ? "✓ Connected" : "Connect"}
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── Browser automation ── */}
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+            Browser automation
+          </span>
+          <span style={{ fontSize: 11, background: "#10b98120", color: "#10b981", borderRadius: 4, padding: "1px 6px", fontWeight: 500 }}>
+            Always on
+          </span>
+        </div>
+        <p style={{ fontSize: 11, color: "var(--text-muted)" }}>
+          Uxie can control any website — book restaurants, fill forms, read pages — using a built-in browser. No setup needed.
+        </p>
       </div>
     </div>
   );

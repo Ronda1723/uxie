@@ -98,6 +98,13 @@ export function registerIpc() {
     invoke("execute_command", { command: text })
   );
 
+  // Approval widget — user clicks "Do it" or "Cancel" (from overlay or in-app)
+  ipcMain.handle("agent:resolve-approval", async (_e, approved: boolean) => {
+    const { hideOverlay } = await import("./overlayWindow");
+    hideOverlay();
+    return invoke("resolve_approval", { approved });
+  });
+
   // Permissions — onboarding modal reads + requests these
   ipcMain.handle(EXTRA.permGetAll, () => permissions.getAll());
   ipcMain.handle(EXTRA.permRequest, (_e, id: permissions.PermissionId) =>
@@ -106,6 +113,23 @@ export function registerIpc() {
 
   // Pin the popover open (prevents hide-on-blur during onboarding / sensitive flows)
   ipcMain.handle(EXTRA.windowPin, (_e, pinned: boolean) => setPopoverPinned(!!pinned));
+
+  // MCP connector management
+  ipcMain.handle("mcp:getStatus",       () => invoke("mcp_get_status", {}));
+  ipcMain.handle("mcp:connectServer",   (_e, serverId: string, credentials: Record<string, string>) =>
+    invoke("mcp_connect_server", { server_id: serverId, credentials }));
+  ipcMain.handle("mcp:disconnectServer", (_e, serverId: string) =>
+    invoke("mcp_disconnect_server", { server_id: serverId }));
+
+  // OAuth connectors (Google, Slack)
+  ipcMain.handle("oauth:getConnected", () => invoke("get_connected_providers", {}));
+  ipcMain.handle("oauth:start", async (_e, provider: string) => {
+    const url = await invoke("start_oauth", { provider }) as string;
+    if (url) shell.openExternal(url);
+    return url;
+  });
+  ipcMain.handle("oauth:disconnect", (_e, provider: string) =>
+    invoke("disconnect_provider", { provider }));
 
   // Dictionary
   ipcMain.handle("dict:get",    () => invoke("get_dictionary"));

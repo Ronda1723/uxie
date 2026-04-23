@@ -25,14 +25,14 @@ export function createTray(): Tray {
     console.warn(`[tray] icon not found at ${iconPath}; using fallback`);
   }
   tray = new Tray(img);
-  tray.setToolTip("MiniFlow");
+  tray.setToolTip("Uxie");
 
   tray.on("click", togglePopover);
   tray.on("right-click", () => {
     const ctx = Menu.buildFromTemplate([
       { label: "Open Settings", click: togglePopover },
       { type: "separator" },
-      { label: "Quit MiniFlow", click: () => app.quit() },
+      { label: "Quit Uxie", click: () => app.quit() },
     ]);
     tray?.popUpContextMenu(ctx);
   });

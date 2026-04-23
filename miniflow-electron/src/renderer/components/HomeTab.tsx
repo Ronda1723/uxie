@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { ApprovalWidget } from "./ApprovalWidget";
 
 interface Props {
   userName: string;
@@ -16,25 +17,14 @@ interface HistoryEntry {
   success: boolean;
 }
 
-interface DebugEntry {
-  time: string;
-  type: "stt" | "llm" | "inject" | "error";
-  app: string;
-  text: string;
-  success?: boolean;
-}
 
 export function HomeTab({ userName, isListening, isProcessing, captureMode = "dictation" }: Props) {
   const [commandText, setCommandText] = useState("");
   const [lastTranscript, setLastTranscript] = useState<string>("");
+  const [rawStt, setRawStt] = useState<string>("");
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [debugLog, setDebugLog] = useState<DebugEntry[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
-
-  const addDebug = useCallback((entry: DebugEntry) => {
-    setDebugLog((prev) => [...prev.slice(-49), entry]);
-  }, []);
 
   async function refreshHistory() {
     try {
@@ -46,8 +36,6 @@ export function HomeTab({ userName, isListening, isProcessing, captureMode = "di
   useEffect(() => { refreshHistory(); }, []);
 
   useEffect(() => {
-    // Streaming chunks arrive as the LLM generates them — accumulate into the
-    // preview so the user sees the corrected text grow in real time.
     let streaming = "";
     const offChunk = (window.miniflow as any).onDictationChunk?.((chunk: string) => {
       streaming += chunk;
@@ -56,7 +44,6 @@ export function HomeTab({ userName, isListening, isProcessing, captureMode = "di
     const offTx = (window.miniflow as any).onTranscription?.(
       (p: { transcript: string; is_final: boolean; is_session?: boolean }) => {
         if (!p?.transcript || !p.is_session) return;
-        // Session-final snapshot from the raw Waves transcript (command mode).
         setLastTranscript(p.transcript);
         streaming = "";
         setTimeout(refreshHistory, 1500);
@@ -70,19 +57,13 @@ export function HomeTab({ userName, isListening, isProcessing, captureMode = "di
         setLastTranscript(a.message);
         streaming = "";
       }
-      if (a?.action === "llm-error") {
-        addDebug({ time: now(), type: "error", app: "engine", text: a.message, success: false });
-      }
       refreshHistory();
     });
+    // Debug events carry raw STT and LLM output for comparison
     const offDbg = (window.miniflow as any).onDebugEvent?.((e: any) => {
-      addDebug({
-        time: now(),
-        type: e.type as DebugEntry["type"],
-        app: appLabel(e.app),
-        text: e.text,
-        success: e.success,
-      });
+      if (e?.type === "stt" && e?.text && e.text !== "(empty)") {
+        setRawStt(e.text);
+      }
     });
     return () => { offChunk?.(); offTx?.(); offErr?.(); offAct?.(); offDbg?.(); };
   }, []);
@@ -153,16 +134,31 @@ export function HomeTab({ userName, isListening, isProcessing, captureMode = "di
       {/* Last transcript preview (read-only) — shows what was heard + typed.
           Kept separate from the command bar so the helper's synthetic typing
           doesn't collide with React's controlled input value. */}
-      {lastTranscript && (
+      {(lastTranscript || rawStt) && (
         <div className="section" style={{
           background: "var(--fn-card-bg)", border: "1px solid var(--fn-card-border)",
-          borderRadius: 10, padding: "10px 14px",
+          borderRadius: 10, padding: "10px 14px", display: "flex", flexDirection: "column", gap: 6,
         }}>
-          <div style={{ fontSize: 10, fontWeight: 600, color: "var(--text-muted)",
-                        textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
-            Last transcript
-          </div>
-          <div style={{ fontSize: 13, lineHeight: 1.4 }}>{lastTranscript}</div>
+          {rawStt && (
+            <div>
+              <div style={{ fontSize: 10, fontWeight: 600, color: "var(--text-muted)",
+                            textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 2 }}>
+                Heard (raw)
+              </div>
+              <div style={{ fontSize: 12, lineHeight: 1.4, color: "var(--text-muted)", fontStyle: "italic" }}>
+                {rawStt}
+              </div>
+            </div>
+          )}
+          {lastTranscript && (
+            <div>
+              <div style={{ fontSize: 10, fontWeight: 600, color: "var(--text-muted)",
+                            textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 2 }}>
+                Typed (cleaned)
+              </div>
+              <div style={{ fontSize: 13, lineHeight: 1.4 }}>{lastTranscript}</div>
+            </div>
+          )}
         </div>
       )}
 
@@ -184,11 +180,11 @@ export function HomeTab({ userName, isListening, isProcessing, captureMode = "di
         )}
       </div>
 
-      {/* Debug log */}
-      <DebugPanel entries={debugLog} onClear={() => setDebugLog([])} />
-
       {/* History */}
       {history.length > 0 && <HistoryGrouped entries={history} onRefresh={refreshHistory} />}
+
+      {/* Approval widget — slides up from bottom when agent needs confirmation */}
+      <ApprovalWidget />
     </div>
   );
 }
@@ -238,79 +234,6 @@ function HistoryGrouped({ entries, onRefresh }: { entries: HistoryEntry[]; onRef
   );
 }
 
-// ── Debug panel ───────────────────────────────────────────────────────────────
-
-const TYPE_META: Record<DebugEntry["type"], { label: string; color: string }> = {
-  stt:    { label: "STT",    color: "#3b82f6" },
-  llm:    { label: "LLM",    color: "#10b981" },
-  inject: { label: "INJECT", color: "#8b5cf6" },
-  error:  { label: "ERR",    color: "#ef4444" },
-};
-
-function DebugPanel({ entries, onClear }: { entries: DebugEntry[]; onClear: () => void }) {
-  const bottomRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [entries]);
-
-  return (
-    <div className="section" style={{
-      background: "#0d1117", border: "1px solid #30363d",
-      borderRadius: 10, padding: "10px 14px", fontFamily: "monospace",
-    }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-        <span style={{ fontSize: 10, fontWeight: 600, color: "#8b949e", textTransform: "uppercase", letterSpacing: "0.06em" }}>
-          Debug log
-        </span>
-        <button
-          onClick={onClear}
-          style={{ fontSize: 10, color: "#8b949e", background: "none", border: "none", cursor: "pointer", padding: 0 }}
-        >
-          clear
-        </button>
-      </div>
-      <div style={{ maxHeight: 180, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
-        {entries.length === 0 && (
-          <div style={{ fontSize: 11, color: "#484f58" }}>No events yet — start speaking.</div>
-        )}
-        {entries.map((e, i) => {
-          const meta = TYPE_META[e.type] ?? { label: e.type.toUpperCase(), color: "#8b949e" };
-          return (
-            <div key={i} style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 11, lineHeight: 1.4 }}>
-              <span style={{ color: "#484f58", whiteSpace: "nowrap", flexShrink: 0 }}>{e.time}</span>
-              <span style={{
-                background: meta.color + "22", color: meta.color,
-                borderRadius: 3, padding: "0 4px", fontWeight: 700,
-                fontSize: 10, flexShrink: 0, lineHeight: "16px",
-              }}>{meta.label}</span>
-              <span style={{ color: "#8b949e", flexShrink: 0, fontSize: 10 }}>[{e.app}]</span>
-              <span style={{
-                color: e.success === false ? "#ef4444" : "#e6edf3",
-                wordBreak: "break-word",
-              }}>{e.text}</span>
-              {e.type === "inject" && (
-                <span style={{ color: e.success !== false ? "#10b981" : "#ef4444", flexShrink: 0 }}>
-                  {e.success !== false ? "✓" : "✗"}
-                </span>
-              )}
-            </div>
-          );
-        })}
-        <div ref={bottomRef} />
-      </div>
-    </div>
-  );
-}
-
-function now() {
-  return new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
-function appLabel(bundleId: string): string {
-  if (!bundleId || bundleId === "unknown") return "unknown";
-  const parts = bundleId.split(".");
-  return parts[parts.length - 1] || bundleId;
-}
 
 function groupByDay(entries: HistoryEntry[]): Record<string, HistoryEntry[]> {
   const out: Record<string, HistoryEntry[]> = {};
