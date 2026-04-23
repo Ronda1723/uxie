@@ -135,6 +135,21 @@ def _cal_svc(token: dict):
     return build("calendar", "v3", credentials=_creds(token), cache_discovery=False)
 
 
+_cal_tz_cache: str | None = None
+
+def _cal_timezone(svc) -> str:
+    """Return the user's primary calendar timezone (e.g. 'America/Los_Angeles')."""
+    global _cal_tz_cache
+    if _cal_tz_cache:
+        return _cal_tz_cache
+    try:
+        tz = svc.settings().get(setting="timezone").execute().get("value", "UTC")
+        _cal_tz_cache = tz
+        return tz
+    except Exception:
+        return "UTC"
+
+
 def _drive_svc(token: dict):
     from googleapiclient.discovery import build
     return build("drive", "v3", credentials=_creds(token), cache_discovery=False)
@@ -252,10 +267,11 @@ def execute(name: str, args: dict, token: dict) -> tuple[bool, str]:
 
         elif name == "calendar_create_event":
             svc = _cal_svc(token)
+            tz = _cal_timezone(svc)
             body: dict = {
                 "summary": args["title"],
-                "start": {"dateTime": args["start"], "timeZone": "America/New_York"},
-                "end": {"dateTime": args["end"], "timeZone": "America/New_York"},
+                "start": {"dateTime": args["start"], "timeZone": tz},
+                "end": {"dateTime": args["end"], "timeZone": tz},
             }
             if args.get("attendees"):
                 body["attendees"] = [{"email": a} for a in args["attendees"]]

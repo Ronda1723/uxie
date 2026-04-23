@@ -112,6 +112,10 @@ async def lifespan(app: FastAPI):
     # Warm up litellm in the background so the first real LLM call doesn't
     # pay for module init + cost-map load.
     asyncio.create_task(_warm_litellm())
+    # Pre-fetch a Deepgram ephemeral key so the first hotkey press doesn't
+    # eat the 300–800ms /stt/session round-trip (which was dropping the
+    # first word of an utterance).
+    asyncio.create_task(audio.prewarm_deepgram_key())
     yield
     log.info("MiniFlow engine shutting down")
     await mcp_client.stop()

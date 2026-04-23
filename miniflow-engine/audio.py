@@ -18,6 +18,7 @@ import base64
 import json
 import logging
 import ssl
+import time
 from typing import Callable
 
 import certifi
@@ -55,24 +56,64 @@ async def _emit(event: str, payload):
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-async def _get_deepgram_key() -> str | None:
-    """Fetch a Deepgram API key from the Uxie backend (server holds the key)."""
-    import config as _config
-    jwt = _config.get_jwt()
-    if not jwt:
-        return None
+# Cached Deepgram ephemeral key. The backend mints a 5-min scoped key per call,
+# so we reuse it across hotkey presses within its TTL to skip the ~300–800ms
+# /stt/session round-trip. That round-trip delay is what caused the first word
+# of an utterance to be dropped.
+_cached_dg_key: str | None = None
+_cached_dg_expires_at: float = 0.0
+_cached_dg_lock: asyncio.Lock | None = None
+
+
+async def _get_deepgram_key(force_refresh: bool = False) -> str | None:
+    """Return a valid Deepgram key, refreshing from the backend only when near expiry."""
+    global _cached_dg_key, _cached_dg_expires_at, _cached_dg_lock
+
+    if _cached_dg_lock is None:
+        _cached_dg_lock = asyncio.Lock()
+
+    now = time.time()
+    # Use the cached key if it's still fresh (>30s of headroom).
+    if not force_refresh and _cached_dg_key and now < (_cached_dg_expires_at - 30):
+        return _cached_dg_key
+
+    async with _cached_dg_lock:
+        # Recheck after acquiring the lock — another caller may have refreshed.
+        now = time.time()
+        if not force_refresh and _cached_dg_key and now < (_cached_dg_expires_at - 30):
+            return _cached_dg_key
+
+        import config as _config
+        jwt = _config.get_jwt()
+        if not jwt:
+            return None
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    f"{_config.get_uxie_backend_url()}/stt/session",
+                    headers={"Authorization": f"Bearer {jwt}"},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            key = data.get("token")
+            ttl = int(data.get("expires_in", 300))
+            if key:
+                _cached_dg_key = key
+                _cached_dg_expires_at = time.time() + ttl
+                log.info(f"Cached Deepgram key prefix={key[:8]}... ttl={ttl}s")
+            return key
+        except Exception as e:
+            log.error(f"Failed to fetch STT token from backend: {e}")
+            return None
+
+
+async def prewarm_deepgram_key() -> None:
+    """Fire-and-forget: fetch a key at engine startup so the first hotkey press is warm."""
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(
-                f"{_config.get_uxie_backend_url()}/stt/session",
-                headers={"Authorization": f"Bearer {jwt}"},
-            )
-            resp.raise_for_status()
-            return resp.json().get("token")
+        await _get_deepgram_key()
     except Exception as e:
-        log.error(f"Failed to fetch STT token from backend: {e}")
-        return None
+        log.warning(f"prewarm_deepgram_key failed: {e}")
 
 
 async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
@@ -112,10 +153,24 @@ async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
             ssl=_SSL_CTX,
         )
     except Exception as e:
-        log.error(f"Deepgram connect failed: {e}")
-        _connecting = False
-        await _emit("transcription-error", f"Could not connect to Deepgram: {e}")
-        return
+        # The cached key may have been revoked or expired; refresh once and retry.
+        log.warning(f"Deepgram connect failed ({e}); refreshing key and retrying")
+        key = await _get_deepgram_key(force_refresh=True)
+        if not key:
+            _connecting = False
+            await _emit("transcription-error", f"Could not connect to Deepgram: {e}")
+            return
+        try:
+            _dg_ws = await websockets.connect(
+                url,
+                extra_headers={"Authorization": f"Token {key}"},
+                ssl=_SSL_CTX,
+            )
+        except Exception as e2:
+            log.error(f"Deepgram connect failed on retry: {e2}")
+            _connecting = False
+            await _emit("transcription-error", f"Could not connect to Deepgram: {e2}")
+            return
 
     # Flush any chunks that arrived while we were connecting
     if _chunk_queue:
@@ -160,12 +215,12 @@ async def stop_listening():
     except Exception as e:
         log.warning(f"Could not send CloseStream: {e}")
 
-    # Wait up to 1.5s for Deepgram's final speech_final transcript
+    # Wait up to 2.5s for Deepgram's final speech_final transcript
     try:
         assert _last_seen_received is not None
-        await asyncio.wait_for(_last_seen_received.wait(), timeout=1.5)
+        await asyncio.wait_for(_last_seen_received.wait(), timeout=2.5)
     except asyncio.TimeoutError:
-        log.warning("Timed out waiting for Deepgram final (1.5s); proceeding with what we have")
+        log.warning("Timed out waiting for Deepgram final (2.5s); proceeding with what we have")
 
     raw_text = _consolidate_fragments(_final_fragments)
 

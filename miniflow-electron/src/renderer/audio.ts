@@ -54,9 +54,12 @@ export function useAudioCapture() {
           audio: {
             channelCount: 1,
             sampleRate: SAMPLE_RATE,
+            // EC/NS off — macOS's aggressive cancellation was scrubbing soft speech to silence.
             echoCancellation: false,
             noiseSuppression: false,
-            autoGainControl: false,
+            // AGC on — normalizes voice level so transcription quality stays consistent
+            // across different mic distances / speaker volumes.
+            autoGainControl: true,
           },
         });
       } catch (e) {
