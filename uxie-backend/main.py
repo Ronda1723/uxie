@@ -84,4 +84,12 @@ async def user_status(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    from settings import get_settings
+    s = get_settings()
+    dg = s.deepgram_api_key.strip() if s.deepgram_api_key else ""
+    return {
+        "status": "ok",
+        "deepgram_configured": bool(dg),
+        "deepgram_key_prefix": dg[:8] + "..." if dg else "NOT SET",
+        "deepgram_key_length": len(dg),
+    }
