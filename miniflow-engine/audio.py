@@ -97,6 +97,7 @@ async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
         _connecting = False
         await _emit("transcription-error", "Not signed in to Uxie. Please sign in from Settings.")
         return
+    log.info(f"Deepgram key prefix: {key[:8]}... (len={len(key)})")
 
     url = (
         f"wss://api.deepgram.com/v1/listen"

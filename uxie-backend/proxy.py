@@ -141,6 +141,7 @@ async def stt_session(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(current_user),
 ) -> STTSessionResponse:
-    if not _settings.deepgram_api_key:
+    key = (_settings.deepgram_api_key or "").strip()
+    if not key:
         raise HTTPException(500, "Deepgram API key not configured on server")
-    return STTSessionResponse(token=_settings.deepgram_api_key, expires_in=3600)
+    return STTSessionResponse(token=key, expires_in=3600)
