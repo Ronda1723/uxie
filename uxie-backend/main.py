@@ -149,6 +149,9 @@ async def health(db: AsyncSession = Depends(get_db)):
         "deepgram_key_prefix": (dg[:8] + "...") if dg else None,
         "groq": "ok" if s.groq_api_key else "NOT SET",
         "openai": "ok" if s.openai_api_key else "NOT SET",
+        # Cutover probe: set to the current org so we can see Railway redeploy
+        # after the github.com/Ronda1723 -> github.com/uxie-app transfer.
+        "source": "uxie-app",
     }
 
     status_code = 200 if db_ok else 503
