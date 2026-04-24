@@ -1,6 +1,7 @@
 // Electron main process entry point.
 
 import * as electronNS from "electron";
+import { powerMonitor } from "electron";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -94,6 +95,21 @@ app.whenReady().then(async () => {
       console.error("stop_listening failed:", e)
     );
   }
+
+  // Force-stop the mic when macOS is about to sleep/lock. The native hotkey
+  // event-tap can lose `fn` release events across power transitions, which
+  // leaves the renderer holding the microphone forever. Releasing defensively
+  // on suspend + resume + lock means the orange indicator turns off no matter
+  // what the keyboard hook did.
+  const forceStop = (reason: string) => {
+    _log(`power event: ${reason} — force stop mic`);
+    broadcast(IpcChannels.stopCapture, { mode: "dictation" });
+    invoke("stop_listening").catch(() => {});
+  };
+  powerMonitor.on("suspend",      () => forceStop("suspend"));
+  powerMonitor.on("resume",       () => forceStop("resume"));
+  powerMonitor.on("lock-screen",  () => forceStop("lock-screen"));
+  powerMonitor.on("shutdown",     () => forceStop("shutdown"));
 });
 
 // Renderer → helper bridge for manual type requests (command-bar execute, etc).

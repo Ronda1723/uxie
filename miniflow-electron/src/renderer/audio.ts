@@ -43,12 +43,19 @@ export function useAudioCapture() {
     const flushEvery = Math.floor((SAMPLE_RATE * CHUNK_MS) / 1000);
 
     async function start() {
-      if (active) return;  // ignore duplicate press events from the helper
+      // Defensive cleanup: if a prior session leaked (e.g. sleep ate the
+      // fn-release event, or the helper's event tap got disabled by macOS),
+      // the previous stream/ctx/processor are still alive. Tearing them down
+      // before acquiring a new mic prevents orange-dot-forever bugs.
+      if (active || stream || ctx) {
+        console.warn("[audio] start called with leftover state — cleaning up first");
+        await stop();
+      }
       active = true;
       setCapturing(true);
       watchdog = window.setTimeout(() => {
         console.warn("[audio] watchdog — forcing stop after", MAX_DICTATION_MS, "ms");
-        stop();
+        stop().catch(console.error);
       }, MAX_DICTATION_MS);
       try {
         stream = await navigator.mediaDevices.getUserMedia({
