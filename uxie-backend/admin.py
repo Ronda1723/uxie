@@ -22,7 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import current_user
-from db import LLMUsage, STTUsage, Usage, User, get_db
+from db import LLMUsage, SessionLog, STTUsage, Usage, User, get_db
 from settings import get_settings
 
 _settings = get_settings()
@@ -201,6 +201,39 @@ async def users_json(
             "cost_usd_mtd": round(llm_cost + stt_cost, 4),
         })
     return JSONResponse({"users": out})
+
+
+async def sessions_json(
+    limit: int = 50,
+    user_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_require_admin),
+) -> JSONResponse:
+    """Recent session transcripts across all users (or one, via ?user_id=)."""
+    q = select(SessionLog, User.email).join(User, User.id == SessionLog.user_id)
+    if user_id:
+        q = q.where(SessionLog.user_id == user_id)
+    q = q.order_by(SessionLog.created_at.desc()).limit(min(limit, 200))
+    rows = (await db.execute(q)).all()
+    return JSONResponse({
+        "sessions": [
+            {
+                "id": s.id,
+                "user_id": s.user_id,
+                "email": email,
+                "session_id": s.session_id,
+                "action": s.action,
+                "provider": s.provider,
+                "model": s.model,
+                "input_text": s.input_text,
+                "output_text": s.output_text,
+                "audio_r2_key": s.audio_r2_key,
+                "duration_ms": s.duration_ms,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+            }
+            for (s, email) in rows
+        ]
+    })
 
 
 async def user_detail_json(

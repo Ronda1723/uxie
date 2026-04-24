@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import current_user
-from db import User, get_db
+from db import SessionLog, User, get_db
 from limits import check_and_increment
 from settings import get_settings
 import usage
@@ -58,6 +58,10 @@ class LLMStreamRequest(BaseModel):
     provider: str = "groq"   # "groq" | "openai"
     temperature: float = 0.3
     max_tokens: int = 1024
+    # Client-generated UUID to correlate this LLM call with an audio upload.
+    # Optional — if the client is pre-v1.0.13 it simply won't send one and we'll
+    # still log the session (without audio).
+    session_id: str | None = None
 
 
 _GROQ_BASE = "https://api.groq.com/openai/v1"
@@ -85,9 +89,11 @@ async def _stream_chunks(
     payload: dict,
     *,
     on_usage: "callable | None" = None,
+    on_content_delta: "callable | None" = None,
 ) -> AsyncIterator[bytes]:
-    """Proxy SSE from provider -> client, and on the way through, extract the
-    final `usage` chunk (prompt_tokens, completion_tokens) for billing."""
+    """Proxy SSE from provider -> client. While proxying, sniff `data: {...}`
+    lines to extract the final `usage` chunk (for billing) and the streaming
+    content deltas (for session logging)."""
     import json as _json
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -100,19 +106,69 @@ async def _stream_chunks(
         async for line in resp.aiter_lines():
             if not line:
                 continue
-            # OpenAI/Groq emit `data: {...}` lines; the final usage chunk
-            # lives on a chunk whose choices array is empty and `usage` is set.
-            if on_usage and line.startswith("data: "):
+            if line.startswith("data: "):
                 body = line[6:].strip()
                 if body and body != "[DONE]":
                     try:
                         obj = _json.loads(body)
-                        u = obj.get("usage")
-                        if isinstance(u, dict):
-                            on_usage(u)
+                        if on_usage:
+                            u = obj.get("usage")
+                            if isinstance(u, dict):
+                                on_usage(u)
+                        if on_content_delta:
+                            choices = obj.get("choices") or []
+                            if choices:
+                                delta = (choices[0] or {}).get("delta") or {}
+                                content = delta.get("content")
+                                if content:
+                                    on_content_delta(content)
                     except Exception:
                         pass
             yield (line + "\n\n").encode()
+
+
+def _extract_user_text(messages: list[dict]) -> str:
+    """Pull the last user turn out of the messages array — that's the raw STT
+    transcript we want to log. Falls back to empty string if malformed."""
+    for m in reversed(messages or []):
+        if (m or {}).get("role") == "user":
+            content = m.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                # Multimodal content arrays — join text parts.
+                parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+                return " ".join(parts)
+    return ""
+
+
+async def _record_session(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    session_id: str | None,
+    action: str,
+    provider: str,
+    model: str,
+    input_text: str,
+    output_text: str,
+    duration_ms: int,
+) -> None:
+    try:
+        row = SessionLog(
+            user_id=user_id,
+            session_id=session_id,
+            action=action,
+            provider=provider,
+            model=model,
+            input_text=input_text[:50_000],   # sanity cap; 99.9th percentile well under
+            output_text=output_text[:50_000],
+            duration_ms=duration_ms,
+        )
+        db.add(row)
+        await db.commit()
+    except Exception as e:
+        _log.warning("record_session failed: %s", e)
 
 
 async def llm_stream(
@@ -135,20 +191,22 @@ async def llm_stream(
         "stream_options": {"include_usage": True},
     }
 
-    # Captured by the stream generator and persisted after the response body
-    # is fully sent. Scoped dict avoids needing a closure ref.
-    captured: dict = {"prompt_tokens": 0, "completion_tokens": 0, "started_at": 0.0}
-
     import time as _time
-    captured["started_at"] = _time.perf_counter()
+    input_text = _extract_user_text(body.messages)
+    output_buf: list[str] = []
+    captured: dict = {"prompt_tokens": 0, "completion_tokens": 0, "started_at": _time.perf_counter()}
 
     def _on_usage(u: dict) -> None:
         captured["prompt_tokens"] = int(u.get("prompt_tokens", 0) or 0)
         captured["completion_tokens"] = int(u.get("completion_tokens", 0) or 0)
 
+    def _on_content(c: str) -> None:
+        output_buf.append(c)
+
     async def _wrap():
         try:
-            async for chunk in _stream_chunks(base_url, api_key, payload, on_usage=_on_usage):
+            async for chunk in _stream_chunks(base_url, api_key, payload,
+                                              on_usage=_on_usage, on_content_delta=_on_content):
                 yield chunk
         finally:
             duration_ms = int((_time.perf_counter() - captured["started_at"]) * 1000)
@@ -160,6 +218,17 @@ async def llm_stream(
                 action=action,
                 prompt_tokens=captured["prompt_tokens"],
                 completion_tokens=captured["completion_tokens"],
+                duration_ms=duration_ms,
+            )
+            await _record_session(
+                db,
+                user_id=user.id,
+                session_id=body.session_id,
+                action=action,
+                provider=body.provider,
+                model=body.model,
+                input_text=input_text,
+                output_text="".join(output_buf),
                 duration_ms=duration_ms,
             )
 
@@ -175,6 +244,7 @@ class LLMChatRequest(BaseModel):
     temperature: float = 0.2
     tools: list[dict] | None = None
     tool_choice: str | None = None
+    session_id: str | None = None  # see LLMStreamRequest.session_id
 
 
 async def llm_chat(
@@ -214,6 +284,27 @@ async def llm_chat(
         action="command",
         prompt_tokens=int(u.get("prompt_tokens", 0) or 0),
         completion_tokens=int(u.get("completion_tokens", 0) or 0),
+        duration_ms=duration_ms,
+    )
+
+    # Session log — extract input (last user msg) + output (completion text or
+    # serialized tool calls so we can see what the LLM decided to do).
+    import json as _json
+    choice = (data.get("choices") or [{}])[0].get("message") or {}
+    out_parts: list[str] = []
+    if choice.get("content"):
+        out_parts.append(str(choice["content"]))
+    if choice.get("tool_calls"):
+        out_parts.append("tool_calls=" + _json.dumps(choice["tool_calls"], ensure_ascii=False))
+    await _record_session(
+        db,
+        user_id=user.id,
+        session_id=body.session_id,
+        action="command",
+        provider=body.provider,
+        model=body.model,
+        input_text=_extract_user_text(body.messages),
+        output_text="\n".join(out_parts),
         duration_ms=duration_ms,
     )
     return data

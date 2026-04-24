@@ -115,6 +115,13 @@
     </section>
 
     <section>
+      <h2>Recent sessions · raw STT vs LLM output</h2>
+      <div style="background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden;" id="sessions-container">
+        <div style="padding: 14px; color: var(--muted)">loading…</div>
+      </div>
+    </section>
+
+    <section>
       <h2>Users</h2>
       <table id="users-table">
         <thead>
@@ -190,6 +197,7 @@ function card(label, value, sub) {
 
 async function loadStats() { return apiJson("/admin/stats.json"); }
 async function loadUsers() { return apiJson("/admin/users.json"); }
+async function loadSessions() { return apiJson("/admin/sessions.json?limit=50"); }
 
 function renderSummary(s) {
   const u = s.users;
@@ -281,13 +289,51 @@ function closeDrawer() {
   document.getElementById("drawer").classList.remove("open");
 }
 
+function escapeHtml(s) {
+  return (s ?? "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+}
+
+function renderSessions(sessions) {
+  const container = document.getElementById("sessions-container");
+  if (!sessions || sessions.length === 0) {
+    container.innerHTML = `<div style="padding:14px;color:var(--muted)">no sessions logged yet — trigger a dictation from the Mac app</div>`;
+    return;
+  }
+  container.innerHTML = sessions.map(s => `
+    <details style="border-bottom: 1px solid var(--border); padding: 10px 14px;">
+      <summary style="cursor: pointer; display: flex; gap: 12px; align-items: center; font-size: 13px;">
+        <span style="font-variant-numeric: tabular-nums; color: var(--muted); min-width: 120px;">${fmtDate(s.created_at)}</span>
+        <span style="min-width: 180px; color: var(--muted);">${escapeHtml(s.email)}</span>
+        <span style="min-width: 90px;">${s.action}</span>
+        <span class="mono" style="min-width: 160px; color: var(--muted); font-size: 11px;">${s.provider}/${escapeHtml(s.model)}</span>
+        <span style="color: var(--muted); font-size: 11px;">${s.duration_ms}ms</span>
+        <span style="flex:1; color: var(--text); font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">"${escapeHtml((s.input_text || "").slice(0, 80))}"</span>
+      </summary>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 12px; padding: 4px 0;">
+        <div>
+          <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 6px;">Raw STT input</div>
+          <div style="background: #0c0c0e; padding: 10px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; line-height: 1.45;">${escapeHtml(s.input_text || "(empty)")}</div>
+        </div>
+        <div>
+          <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 6px;">LLM output</div>
+          <div style="background: #0c0c0e; padding: 10px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; line-height: 1.45;">${escapeHtml(s.output_text || "(empty)")}</div>
+        </div>
+      </div>
+      ${s.audio_r2_key ? `<div style="margin-top: 10px;"><audio controls style="width:100%" src="/admin/audio/${s.id}"></audio></div>` : ""}
+    </details>
+  `).join("");
+}
+
 (async () => {
   try {
-    const [stats, users] = await Promise.all([loadStats(), loadUsers()]);
+    const [stats, users, sessions] = await Promise.all([loadStats(), loadUsers(), loadSessions()]);
     document.getElementById("meta").textContent = "updated " + fmtDate(stats.generated_at);
     renderSummary(stats);
     renderLLMTable("#llm-24h-table", stats.llm.last_24h);
     renderLLMTable("#llm-mtd-table", stats.llm.mtd);
+    renderSessions(sessions.sessions);
     renderUsers(users.users);
   } catch (e) {
     showError(e.message);

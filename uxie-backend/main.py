@@ -102,6 +102,7 @@ app.add_api_route("/referral/stats", referral.get_referral_stats, methods=["GET"
 app.add_api_route("/admin/dashboard",    admin.dashboard_html, methods=["GET"], response_class=__import__("fastapi").responses.HTMLResponse)
 app.add_api_route("/admin/stats.json",   admin.stats_json,     methods=["GET"])
 app.add_api_route("/admin/users.json",   admin.users_json,     methods=["GET"])
+app.add_api_route("/admin/sessions.json", admin.sessions_json, methods=["GET"])
 app.add_api_route("/admin/user/{user_id}.json", admin.user_detail_json, methods=["GET"])
 
 

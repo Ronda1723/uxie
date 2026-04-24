@@ -14,7 +14,7 @@ import secrets
 import string
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, relationship
 
@@ -123,6 +123,25 @@ class STTUsage(Base):
     provider = Column(String, nullable=False, default="deepgram")
     deepgram_key_id = Column(String, nullable=True)    # Deepgram's api_key_id — reconcile later with their Usage API
     cost_usd_est = Column(Float, nullable=False, default=0.0)  # MVP estimate; reconcile later
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now, index=True)
+
+
+class SessionLog(Base):
+    """Per-call transcript log for admin debugging. Captures raw STT text
+    (the user message we got from the client) and the LLM's corrected output.
+    Audio is attached separately as an R2 object key once client uploads it."""
+    __tablename__ = "session_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(String, nullable=True, index=True)  # client-generated UUID for audio correlation
+    action = Column(String, nullable=False)             # "dictation" | "command"
+    provider = Column(String, nullable=False)
+    model = Column(String, nullable=False)
+    input_text = Column(Text, nullable=False)           # raw STT transcript the client sent us
+    output_text = Column(Text, nullable=False)          # LLM's response (dictation: corrected text; command: tool calls JSON)
+    audio_r2_key = Column(String, nullable=True)        # filled by /debug/upload-audio when client uploads audio
+    duration_ms = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now, index=True)
 
 
