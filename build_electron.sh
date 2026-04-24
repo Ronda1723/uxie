@@ -15,7 +15,7 @@
 #   SKIP_HELPER=1       skip cargo build (reuse existing target/release)
 #   SKIP_NPM_INSTALL=1  skip npm install (reuse node_modules)
 #   SKIP_RELEASE=1      skip GitHub release upload
-#   GITHUB_REPO=owner/repo  override repo (default: Ronda1723/Miniflow)
+#   GITHUB_REPO=owner/repo  override repo (default: uxie-app/uxie-releases)
 
 set -euo pipefail
 
@@ -90,7 +90,7 @@ if ! command -v gh &>/dev/null; then
   exit 0
 fi
 
-REPO="${GITHUB_REPO:-Ronda1723/Miniflow}"
+REPO="${GITHUB_REPO:-uxie-app/uxie-releases}"
 TAG="v${VERSION}"
 
 echo ""

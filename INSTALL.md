@@ -10,7 +10,7 @@ it once. This is a one-time step — after the first launch, Uxie runs normally.
 Copy-paste into **Terminal** (Spotlight → `Terminal`):
 
 ```
-curl -fsSL https://raw.githubusercontent.com/Ronda1723/uxie/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/uxie-app/uxie-releases/main/install.sh | bash
 ```
 
 That's it. The script downloads the latest DMG, copies Uxie to
@@ -29,7 +29,7 @@ First launch will prompt for **Microphone**, **Accessibility**, and
 ## Manual path (if you'd rather not pipe curl into bash)
 
 1. Download the latest DMG directly from
-   https://github.com/Ronda1723/uxie/releases/latest (grab the
+   https://github.com/uxie-app/uxie-releases/releases/latest (grab the
    `Uxie-<version>-arm64.dmg` file)
 2. Double-click the DMG, drag **Uxie** onto the **Applications** folder
 3. macOS will show **"Uxie is damaged and can't be opened"** on first launch —

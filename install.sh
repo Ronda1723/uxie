@@ -3,7 +3,7 @@
 # copies it to /Applications, and strips the Gatekeeper quarantine flag.
 #
 # Run with:
-#   curl -fsSL https://raw.githubusercontent.com/Ronda1723/uxie/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/uxie-app/uxie-releases/main/install.sh | bash
 #
 # Until Uxie has a notarized build (Apple Developer account pending), this
 # script is the smoothest way to install — it's the exact same thing the
@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-REPO="Ronda1723/uxie"
+REPO="uxie-app/uxie-releases"
 APP_NAME="Uxie"
 
 say()  { printf "\033[1;36m→ %s\033[0m\n" "$*"; }
