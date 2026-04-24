@@ -321,7 +321,7 @@ function renderSessions(sessions) {
           <div style="background: #0c0c0e; padding: 10px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; line-height: 1.45;">${escapeHtml(s.output_text || "(empty)")}</div>
         </div>
       </div>
-      ${s.audio_r2_key ? `<div style="margin-top: 10px;"><audio controls style="width:100%" src="/admin/audio/${s.id}"></audio></div>` : ""}
+      ${s.audio_url ? `<div style="margin-top: 10px;"><audio controls preload="metadata" style="width:100%" src="${s.audio_url}"></audio></div>` : ""}
     </details>
   `).join("");
 }

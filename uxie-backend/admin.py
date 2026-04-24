@@ -210,31 +210,36 @@ async def sessions_json(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_require_admin),
 ) -> JSONResponse:
-    """Recent session transcripts across all users (or one, via ?user_id=)."""
+    """Recent session transcripts across all users (or one, via ?user_id=).
+    Each session's audio (if uploaded) is pre-signed into a 1h URL so the
+    <audio> tag in the dashboard can stream it directly — <audio src=…>
+    doesn't send Authorization headers so a JWT-guarded redirect won't work."""
     q = select(SessionLog, User.email).join(User, User.id == SessionLog.user_id)
     if user_id:
         q = q.where(SessionLog.user_id == user_id)
     q = q.order_by(SessionLog.created_at.desc()).limit(min(limit, 200))
     rows = (await db.execute(q)).all()
-    return JSONResponse({
-        "sessions": [
-            {
-                "id": s.id,
-                "user_id": s.user_id,
-                "email": email,
-                "session_id": s.session_id,
-                "action": s.action,
-                "provider": s.provider,
-                "model": s.model,
-                "input_text": s.input_text,
-                "output_text": s.output_text,
-                "audio_r2_key": s.audio_r2_key,
-                "duration_ms": s.duration_ms,
-                "created_at": s.created_at.isoformat() if s.created_at else None,
-            }
-            for (s, email) in rows
-        ]
-    })
+    out = []
+    for (s, email) in rows:
+        audio_url = None
+        if s.audio_r2_key:
+            audio_url = r2.presigned_get_url(s.audio_r2_key, expires_in_seconds=3600)
+        out.append({
+            "id": s.id,
+            "user_id": s.user_id,
+            "email": email,
+            "session_id": s.session_id,
+            "action": s.action,
+            "provider": s.provider,
+            "model": s.model,
+            "input_text": s.input_text,
+            "output_text": s.output_text,
+            "audio_r2_key": s.audio_r2_key,
+            "audio_url": audio_url,
+            "duration_ms": s.duration_ms,
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+        })
+    return JSONResponse({"sessions": out})
 
 
 async def audio_redirect(
