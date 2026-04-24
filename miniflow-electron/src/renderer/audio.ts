@@ -55,7 +55,7 @@ export function useAudioCapture() {
       setCapturing(true);
       watchdog = window.setTimeout(() => {
         console.warn("[audio] watchdog — forcing stop after", MAX_DICTATION_MS, "ms");
-        stop().catch(console.error);
+        serialized(stop).catch(console.error);
       }, MAX_DICTATION_MS);
       try {
         stream = await navigator.mediaDevices.getUserMedia({
@@ -146,15 +146,29 @@ export function useAudioCapture() {
       console.log("[audio] mic released");
     }
 
+    // Serialize start/stop so rapid fn double-taps can't race. Without this,
+    // a fast press → release → press sequence would fire a second
+    // getUserMedia while the first was still resolving; the second assigns to
+    // `stream` overwriting the first's reference, so the first MediaStream's
+    // tracks never get .stop()'d → mic stays on forever.
+    let opChain: Promise<void> = Promise.resolve();
+    function serialized(fn: () => Promise<void>) {
+      const next = opChain.catch(() => {}).then(fn);
+      opChain = next.catch(() => {});
+      return next;
+    }
+
     const offStart = window.miniflow.onStartCapture((p: any) => {
       setMode(p?.mode === "command" ? "command" : "dictation");
-      start().catch(console.error);
+      serialized(start).catch(console.error);
     });
-    const offStop  = window.miniflow.onStopCapture(() => { stop().catch(console.error); });
+    const offStop  = window.miniflow.onStopCapture(() => {
+      serialized(stop).catch(console.error);
+    });
 
     return () => {
       offStart(); offStop();
-      stop().catch(console.error);
+      serialized(stop).catch(console.error);
     };
   }, []);
 
