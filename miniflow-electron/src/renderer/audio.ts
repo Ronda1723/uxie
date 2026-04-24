@@ -35,6 +35,7 @@ export function useAudioCapture() {
     let ctx: AudioContext | null = null;
     let processor: ScriptProcessorNode | null = null;
     let source: MediaStreamAudioSourceNode | null = null;
+    let sink: GainNode | null = null;
     let buffer: Float32Array[] = [];
     let bufferedSamples = 0;
     let watchdog: number | null = null;
@@ -97,13 +98,13 @@ export function useAudioCapture() {
       // to the speakers. We pipe audio out via our onaudioprocess handler and
       // send it to the Python backend. Keep the processor node alive via a
       // zero-gain sink so it continues to receive samples.
-      const sink = ctx.createGain();
+      sink = ctx.createGain();
       sink.gain.value = 0;
       processor.connect(sink);
       sink.connect(ctx.destination);
     }
 
-    function stop() {
+    async function stop() {
       if (!active && !stream && !ctx) {
         setCapturing(false);
         return;
@@ -111,24 +112,42 @@ export function useAudioCapture() {
       active = false;
       setCapturing(false);
       if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+      // Order matters for macOS to drop the orange mic indicator promptly.
+      // 1) Suspend the context so onaudioprocess stops firing.
+      try { if (ctx && ctx.state !== "closed") await ctx.suspend(); } catch {}
+      // 2) Disconnect every node (including the sink → destination link that
+      //    the old stop() forgot; Chromium treats a connected graph as "in
+      //    use" and delays releasing the underlying MediaStream).
       try { processor?.disconnect(); } catch {}
+      try { sink?.disconnect(); } catch {}
       try { source?.disconnect(); } catch {}
-      // Stop EVERY mic track explicitly so macOS drops the orange indicator.
-      try { stream?.getTracks().forEach((t) => t.stop()); } catch {}
-      try { ctx?.close(); } catch {}
-      stream = null; ctx = null; processor = null; source = null;
+      if (processor) processor.onaudioprocess = null;
+      // 3) Remove + stop each mic track explicitly. removeTrack() before
+      //    stop() helps Chromium tear the MediaStream down.
+      try {
+        stream?.getTracks().forEach((t) => {
+          try { stream?.removeTrack(t); } catch {}
+          try { t.stop(); } catch {}
+        });
+      } catch {}
+      // 4) Actually await ctx.close() so the resource is fully released
+      //    before we drop the reference — otherwise macOS keeps the orange
+      //    dot on until the GC eventually runs.
+      try { if (ctx && ctx.state !== "closed") await ctx.close(); } catch {}
+      stream = null; ctx = null; processor = null; source = null; sink = null;
       buffer = []; bufferedSamples = 0;
+      console.log("[audio] mic released");
     }
 
     const offStart = window.miniflow.onStartCapture((p: any) => {
       setMode(p?.mode === "command" ? "command" : "dictation");
       start().catch(console.error);
     });
-    const offStop  = window.miniflow.onStopCapture(() => stop());
+    const offStop  = window.miniflow.onStopCapture(() => { stop().catch(console.error); });
 
     return () => {
       offStart(); offStop();
-      stop();
+      stop().catch(console.error);
     };
   }, []);
 
