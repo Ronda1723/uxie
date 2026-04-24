@@ -37,12 +37,14 @@ _dg_ws = None                          # Deepgram WebSocket
 _sample_rate = 16000
 _session_active = False
 _session_mode: str = "dictation"
+_session_id: str = ""                  # UUID generated per session; threaded through LLM calls + audio upload
 _final_fragments: list[str] = []       # accumulates is_final transcripts
 _latest_interim: str = ""              # most recent interim hypothesis (in-flight, not yet final)
 _last_seen_received: asyncio.Event | None = None
 _receive_task: asyncio.Task | None = None
 _chunk_queue: list[bytes] = []         # buffers chunks received before socket connects
 _connecting: bool = False
+_captured_pcm: bytearray = bytearray() # full-session audio for admin debugging upload
 
 
 def set_event_broadcaster(fn: Callable):
@@ -117,18 +119,54 @@ async def prewarm_deepgram_key() -> None:
         log.warning(f"prewarm_deepgram_key failed: {e}")
 
 
+async def _upload_session_audio(session_id: str, pcm: bytes, sample_rate: int) -> None:
+    """Upload the captured PCM to the backend's /debug/upload-audio. 503s are
+    silently ignored (R2 not configured is fine — text logging still works)."""
+    if not pcm or len(pcm) < 1000:  # <~30ms of audio — probably an aborted session
+        return
+    import config as _config
+    jwt = _config.get_jwt()
+    if not jwt:
+        return
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{_config.get_uxie_backend_url()}/debug/upload-audio",
+                content=bytes(pcm),
+                headers={
+                    "Authorization": f"Bearer {jwt}",
+                    "Content-Type": "application/octet-stream",
+                    "X-Session-Id": session_id,
+                    "X-Sample-Rate": str(sample_rate),
+                },
+            )
+            if resp.status_code == 503:
+                return  # R2 not configured on backend; expected in dev
+            if resp.status_code >= 400:
+                log.warning(f"audio upload failed: {resp.status_code} {resp.text[:200]}")
+            else:
+                log.info(f"audio uploaded: session={session_id[:8]}... bytes={len(pcm)}")
+    except Exception as e:
+        log.warning(f"audio upload exception: {e}")
+
+
 async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
     global _dg_ws, _sample_rate, _final_fragments, _latest_interim, _session_active, _session_mode
     global _last_seen_received, _receive_task, _chunk_queue, _connecting
+    global _session_id, _captured_pcm
+    import uuid as _uuid
     _sample_rate = sample_rate
     _final_fragments = []
     _latest_interim = ""
     _chunk_queue = []
+    _captured_pcm = bytearray()
+    _session_id = _uuid.uuid4().hex
     _connecting = True
     _session_active = True
     _session_mode = mode if mode in ("dictation", "command") else "dictation"
     _last_seen_received = asyncio.Event()
-    log.info(f"Starting listening session: mode={_session_mode}")
+    log.info(f"Starting listening session: mode={_session_mode} session_id={_session_id}")
 
     # Capture selected text NOW so transform commands have the selection available.
     if _session_mode == "command":
@@ -193,6 +231,9 @@ async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
 
 async def send_audio_chunk(chunk: str):
     decoded = base64.b64decode(chunk)
+    # Always tap a copy for admin audio debugging. This is a no-op when R2
+    # isn't configured on the backend (upload is skipped at session end).
+    _captured_pcm.extend(decoded)
     if _connecting:
         _chunk_queue.append(decoded)
         return
@@ -297,6 +338,13 @@ async def stop_listening():
         await _emit("action-result", {"action": "agent-error", "success": False, "message": str(e)})
     finally:
         await _emit("agent-status", "idle")
+        # Upload captured audio to the admin debug bucket in the background so
+        # we can replay what Deepgram heard when transcripts look wrong. Safe
+        # no-op when the backend's R2 env vars aren't set.
+        try:
+            asyncio.create_task(_upload_session_audio(_session_id, bytes(_captured_pcm), _sample_rate))
+        except Exception as e:
+            log.warning(f"schedule audio upload failed: {e}")
 
 
 # ── Internal ──────────────────────────────────────────────────────────────────

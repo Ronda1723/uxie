@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     def admin_email_set(self) -> set[str]:
         return {e.strip().lower() for e in self.admin_emails.split(",") if e.strip()}
 
+    # Cloudflare R2 — stores per-session audio for admin debugging. Optional;
+    # when unset, /debug/upload-audio 503s cleanly and text-only logging keeps
+    # working.
+    r2_account_id: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    r2_bucket_name: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import admin
 import auth
+import debug
 import limits
 import proxy
 import referral
@@ -104,6 +105,12 @@ app.add_api_route("/admin/stats.json",   admin.stats_json,     methods=["GET"])
 app.add_api_route("/admin/users.json",   admin.users_json,     methods=["GET"])
 app.add_api_route("/admin/sessions.json", admin.sessions_json, methods=["GET"])
 app.add_api_route("/admin/user/{user_id}.json", admin.user_detail_json, methods=["GET"])
+app.add_api_route("/admin/audio/{session_row_id}", admin.audio_redirect, methods=["GET"])
+
+
+# ── Debug (client audio upload) ───────────────────────────────────────────────
+
+app.add_api_route("/debug/upload-audio", debug.upload_audio, methods=["POST"])
 
 
 # ── User status ───────────────────────────────────────────────────────────────

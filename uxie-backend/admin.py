@@ -17,10 +17,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import r2
 from auth import current_user
 from db import LLMUsage, SessionLog, STTUsage, Usage, User, get_db
 from settings import get_settings
@@ -234,6 +235,27 @@ async def sessions_json(
             for (s, email) in rows
         ]
     })
+
+
+async def audio_redirect(
+    session_row_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_require_admin),
+):
+    """Admin hits /admin/audio/{session_row_id}; we look up the R2 key and
+    redirect to a 1h-TTL presigned URL so the browser's <audio> tag streams
+    directly from R2 without proxying bytes through Railway."""
+    row = (await db.execute(
+        select(SessionLog).where(SessionLog.id == session_row_id)
+    )).scalar_one_or_none()
+    if not row:
+        raise HTTPException(404, "session not found")
+    if not row.audio_r2_key:
+        raise HTTPException(404, "no audio recorded for this session")
+    url = r2.presigned_get_url(row.audio_r2_key, expires_in_seconds=3600)
+    if not url:
+        raise HTTPException(503, "R2 not configured or presign failed")
+    return RedirectResponse(url, status_code=302)
 
 
 async def user_detail_json(

@@ -121,6 +121,17 @@ def _uxie_backend_provider(model: str) -> str:
     return "groq" if any(f in model.lower() for f in groq_families) else "openai"
 
 
+def _current_session_id() -> str | None:
+    """Read the current audio session id from audio.py, if any. Threaded into
+    /llm/stream and /llm/chat requests so the backend's SessionLog row can be
+    correlated with the uploaded audio blob of the same session."""
+    try:
+        import audio as _audio
+        return getattr(_audio, "_session_id", None) or None
+    except Exception:
+        return None
+
+
 async def _uxie_chat_stream(
     messages: list[dict],
     model: str,
@@ -137,6 +148,9 @@ async def _uxie_chat_stream(
         "temperature": temperature,
         "max_tokens": 1024,
     }
+    sid = _current_session_id()
+    if sid:
+        payload["session_id"] = sid
     headers = {"Authorization": f"Bearer {jwt}"}
     base = _config.get_uxie_backend_url()
     async with httpx.AsyncClient(timeout=60) as client:
@@ -177,6 +191,9 @@ async def _uxie_chat(
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    sid = _current_session_id()
+    if sid:
+        payload["session_id"] = sid
 
     headers = {"Authorization": f"Bearer {jwt}"}
     base = _config.get_uxie_backend_url()
