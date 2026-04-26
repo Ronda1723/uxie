@@ -1,24 +1,18 @@
-[package]
-name = "miniflow-fn-helper"
-version = "0.4.0"
+[workspace]
+resolver = "2"
+members = [
+    "helper-mac",
+    "helper-win",
+]
+
+# `cargo build` from the workspace root would try to build *every* member,
+# which fails on macOS (helper-win uses Windows-only APIs) and vice versa.
+# Build the platform-specific crate explicitly, e.g.:
+#   cargo build --release -p helper-mac     # on macOS
+#   cargo build --release -p helper-win     # on Windows
+default-members = []
+
+[workspace.package]
+version = "0.5.0"
 edition = "2021"
-description = "MiniFlow native macOS helper — hotkey detection + synthetic typing"
 license = "MIT"
-
-[[bin]]
-name = "miniflow-fn-helper"
-path = "src/main.rs"
-
-[dependencies]
-core-foundation = "0.10"
-core-graphics = "0.24"
-serde        = { version = "1", features = ["derive"] }
-serde_json   = "1"
-dirs         = "5"
-signal-hook  = "0.3"
-
-[profile.release]
-lto = true
-codegen-units = 1
-strip = true
-opt-level = "z"

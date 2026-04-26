@@ -15,19 +15,17 @@ import { waitUntilHealthy } from "./api";
 let engineProc: ChildProcess | null = null;
 
 function engineBinaryPath(): string {
+  // PyInstaller appends .exe on Windows; bare on macOS. Same logic for the
+  // packaged Resources path and the dev sibling-dir fallback.
+  const exeName = process.platform === "win32" ? "miniflow-engine.exe" : "miniflow-engine";
   if (app.isPackaged) {
-    return path.join(
-      process.resourcesPath,
-      "miniflow-engine",
-      "miniflow-engine"
-    );
+    return path.join(process.resourcesPath, "miniflow-engine", exeName);
   }
   // Dev: assume sibling source dir. Users will typically run the Python directly,
   // so we only try to spawn if the PyInstaller output exists.
-  const devBundle = path.resolve(
-    __dirname, "..", "..", "..", "miniflow-engine", "dist", "miniflow-engine", "miniflow-engine"
+  return path.resolve(
+    __dirname, "..", "..", "..", "miniflow-engine", "dist", "miniflow-engine", exeName
   );
-  return devBundle;
 }
 
 export async function startEngine(): Promise<void> {

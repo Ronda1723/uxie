@@ -47,8 +47,18 @@ else
   echo ""
   echo "━━━ Step 2/4: Rust native helper ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   source "$HOME/.cargo/env" 2>/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
-  (cd "$HELPER_DIR" && cargo build --release)
-  ls -la "$HELPER_DIR/target/release/miniflow-fn-helper"
+  # Pick the right workspace member for this host. The Cargo workspace at
+  # native-helper/Cargo.toml has both members; we never compile the wrong one
+  # (the foreign one's deps wouldn't link anyway).
+  case "$(uname -s)" in
+    Darwin)                            HELPER_CRATE="helper-mac" ;;
+    Linux|MINGW*|MSYS*|CYGWIN*)        HELPER_CRATE="helper-win" ;;
+    *) echo "✗ Unsupported host OS: $(uname -s)" >&2; exit 1 ;;
+  esac
+  echo "  host=$(uname -s)  crate=$HELPER_CRATE"
+  (cd "$HELPER_DIR" && cargo build --release -p "$HELPER_CRATE")
+  # Binary name is identical across platforms (with .exe suffix on Windows).
+  ls -la "$HELPER_DIR/target/release/miniflow-fn-helper"* 2>/dev/null | tail -1
 fi
 
 # ── Step 3: Electron TypeScript + Vite ────────────────────────────────────────

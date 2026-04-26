@@ -24,20 +24,24 @@ export class HelperManager extends EventEmitter {
   private stdoutBuffer = "";
 
   private binaryPath(): string {
+    // helper-mac and helper-win both produce a binary named miniflow-fn-helper;
+    // Cargo on Windows appends .exe automatically.
+    const exeName = process.platform === "win32" ? "miniflow-fn-helper.exe" : "miniflow-fn-helper";
     if (app.isPackaged) {
-      return path.join(process.resourcesPath, "miniflow-fn-helper");
+      return path.join(process.resourcesPath, exeName);
     }
     return path.resolve(
-      __dirname, "..", "..", "..", "native-helper", "target", "release", "miniflow-fn-helper"
+      __dirname, "..", "..", "..", "native-helper", "target", "release", exeName
     );
   }
 
   start(): void {
     const bin = this.binaryPath();
     if (!fs.existsSync(bin)) {
+      const crate = process.platform === "win32" ? "helper-win" : "helper-mac";
       this.emit(
         "error",
-        `helper binary missing at ${bin}. Run: cd native-helper && cargo build --release`
+        `helper binary missing at ${bin}. Run: cd native-helper && cargo build --release -p ${crate}`
       );
       return;
     }

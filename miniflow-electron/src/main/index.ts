@@ -35,9 +35,11 @@ import { registerIpc } from "./ipc";
 import { invoke } from "./api";
 import { IpcChannels } from "../shared/types";
 import { createOverlayWindow } from "./overlayWindow";
+import { getFrontmostAppId, hideDockIcon } from "./platform";
 
-// macOS: hide from dock (also enforced by LSUIElement in Info.plist).
-app.dock?.hide();
+// Hide from dock on macOS (no-op on Windows). LSUIElement in Info.plist
+// also enforces this on macOS.
+hideDockIcon(app);
 
 // Single instance lock
 if (!app.requestSingleInstanceLock()) {
@@ -74,15 +76,11 @@ app.whenReady().then(async () => {
 
   // Broadcast start/stop to the popover window; the renderer owns the mic.
   function onPress(mode: "dictation" | "command") {
-    // Capture bundle ID FIRST — before broadcast which may steal focus
-    let bundleID: string | null = null;
-    try {
-      const { execSync } = require("node:child_process");
-      bundleID = execSync(
-        `osascript -e 'tell application "System Events" to get bundle identifier of (first process whose frontmost is true)'`,
-        { timeout: 500, encoding: "utf8" }
-      ).trim() || null;
-    } catch {}
+    // Capture bundle ID FIRST — before broadcast which may steal focus.
+    // On Windows this currently returns null until we wire UIAutomation;
+    // the agent treats null as "no target app context" and dictation still
+    // works fine.
+    const bundleID = getFrontmostAppId();
     console.log("[hotkey] bundleID:", bundleID);
     broadcast(IpcChannels.startCapture, { mode });
     invoke("start_listening", { sampleRate: 16000, mode, bundleID }).catch((e) =>

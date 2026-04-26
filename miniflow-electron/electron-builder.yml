@@ -10,15 +10,13 @@ files:
   - package.json
   - "!**/*.map"
 
+# Files shared across all platforms — engine bundle + tray template icons.
+# The native helper binary differs per platform (.exe on Windows) so it lives
+# inside the per-platform `extraResources` blocks below.
 extraResources:
-  # PyInstaller onedir bundle, produced by build_backend.sh
   - from: ../miniflow-engine/dist/miniflow-engine
     to: miniflow-engine
     filter: ["**/*"]
-  # Rust native helper, built with cargo build --release
-  - from: ../native-helper/target/release/miniflow-fn-helper
-    to: miniflow-fn-helper
-  # Tray icons (menu-bar template image, 1x and 2x)
   - from: resources/iconTemplate.png
     to: iconTemplate.png
   - from: resources/iconTemplate@2x.png
@@ -38,6 +36,25 @@ mac:
     NSMicrophoneUsageDescription: "Uxie needs microphone access for voice commands."
     NSAccessibilityUsageDescription: "Uxie types dictated text into the focused app."
     LSUIElement: true # menu-bar only, no dock icon
+  extraResources:
+    - from: ../native-helper/target/release/miniflow-fn-helper
+      to: miniflow-fn-helper
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  # icon: resources/icon.ico   # TODO: render a 256x256 .ico for Windows; reuse macOS PNGs in the meantime
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  extraResources:
+    - from: ../native-helper/target/release/miniflow-fn-helper.exe
+      to: miniflow-fn-helper.exe
+
+nsis:
+  oneClick: false
+  perMachine: false              # per-user install — no UAC prompt
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
 
 dmg:
   writeUpdateInfo: false

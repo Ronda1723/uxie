@@ -1,17 +1,27 @@
 # Uxie — Claude Code Context
 
 ## What this is
-Uxie is a voice-powered macOS desktop agent. Users speak → Uxie dictates or runs agentic commands. Stack: Electron (TypeScript/React) + Python FastAPI engine (PyInstaller bundle) + Rust native helper + Railway FastAPI backend.
+Uxie is a voice-powered desktop agent. Users speak → Uxie dictates or runs agentic commands. macOS today; Windows port in progress (same repo, conditional code). Stack: Electron (TypeScript/React) + Python FastAPI engine (PyInstaller bundle) + Rust native helper (Cargo workspace, one crate per OS) + Railway FastAPI backend.
 
 ## Repo layout
 ```
-miniflow-electron/   Electron shell (TypeScript + React + Vite)
-miniflow-engine/     Python backend (runs locally as PyInstaller binary)
-native-helper/       Rust hotkey/accessibility helper
-uxie-backend/        Railway cloud backend (auth + API proxy)
-build_electron.sh    Full build + GitHub release script
-build_backend.sh     PyInstaller-only build
+miniflow-electron/         Electron shell (TypeScript + React + Vite)
+  src/main/platform.ts     OS-conditional helpers (dock-hide, frontmost-app probe)
+miniflow-engine/           Python backend (runs locally as PyInstaller binary)
+native-helper/             Rust Cargo workspace
+  helper-mac/              macOS: CGEventTap + CGEvent (fn key)
+  helper-win/              Windows: WH_KEYBOARD_LL + SendInput (Right-Alt key)
+uxie-backend/              Railway cloud backend (auth + API proxy)
+build_electron.sh          Cross-platform: Mac via bash, Windows via Git Bash
+build_backend.sh           PyInstaller-only build
+.github/workflows/build.yml Cross-platform CI (mac arm64 + win x64 runners)
 ```
+
+## Cross-platform notes (Windows port)
+- Hotkey on Windows is **Right-Alt** (VK_RMENU); `fn` is firmware-level on Windows laptops and not interceptable.
+- helper-mac and helper-win both produce a binary named `miniflow-fn-helper` (with `.exe` on Windows). electron-builder.yml branches the `extraResources` entry per platform.
+- `cargo build --release -p helper-mac` (on Mac) or `-p helper-win` (on Windows). The Cargo workspace's `default-members = []` means `cargo build` from the workspace root does nothing — always specify a crate.
+- TypeScript code goes through `src/main/platform.ts` for OS-specific calls. Don't add new `if (process.platform === ...)` checks elsewhere.
 
 ## CRITICAL: All API calls go through the Railway backend
 
@@ -35,9 +45,10 @@ build_backend.sh     PyInstaller-only build
 - Calling Deepgram/Groq/OpenAI directly from `audio.py` or `agent.py`
 
 ## GitHub + releases
-- **Only repo**: `Ronda1723/uxie` — never push to `Ronda1723/Miniflow`
-- Branch: `uxie-init`
-- Build + release: `bash build_electron.sh` (publishes DMG to GitHub Releases)
+- **Source repo (private)**: `uxie-app/uxie` — branch `uxie-init`, also pushed to `main` for Railway auto-deploy
+- **Distribution repo (public)**: `uxie-app/uxie-releases` — holds installer + DMGs/EXEs
+- Build + release: `bash build_electron.sh` (publishes to `uxie-app/uxie-releases`)
+- CI: `.github/workflows/build.yml` runs on workflow_dispatch (manual trigger) — Mac arm64 + Win x64 runners
 
 ## Railway backend
 - URL: `https://uxie-production.up.railway.app`
