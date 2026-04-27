@@ -50,7 +50,9 @@ You'll be asked for permissions. **Grant all of them** or the hotkey won't work:
 
 On Windows, the equivalent prompts (mic + accessibility-style global hook permission) come up the first time you press Right-Alt.
 
-After installing, sign in with your email (Uxie sends a 6-digit OTP via email; no passwords). The JWT is stored locally in your Keychain (macOS) / DPAPI (Windows). All STT and LLM calls go through Uxie's Railway backend — **no API keys to configure**.
+After installing, sign in with your email (Uxie sends a 6-digit OTP via email; no passwords). The JWT is written to `~/miniflow/uxie_auth.json` (mode `0600` — owner read/write only) and the engine reads it on every backend call. All STT and LLM calls go through Uxie's Railway backend — **no API keys to configure**.
+
+> **Backlog item**: move JWT into the OS keychain (Keychain on macOS, Credential Manager / DPAPI on Windows). Plaintext-on-disk is fine for the beta but wrong as a long-term default. The [`keyring`](https://pypi.org/project/keyring/) helpers in `config.py` are already wired for the legacy LLM-key model — extending them to JWT storage is a small refactor.
 
 ---
 
