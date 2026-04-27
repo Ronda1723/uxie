@@ -32,11 +32,42 @@ else
 fi
 
 if [ ! -d "$VENV" ]; then
-  echo "→ Creating venv at $VENV"
-  # Prefer python3, fall back to python on systems where the unsuffixed name
-  # is the modern interpreter (Windows, some CI images).
-  PY_BOOTSTRAP="$(command -v python3 || command -v python)"
-  [ -n "$PY_BOOTSTRAP" ] || { echo "✗ no python3 / python on PATH"; exit 1; }
+  # Need Python >=3.10 (mcp + several other deps). Apple ships 3.9 as
+  # `python3` on stock macOS — too old. Scan a list of known names and
+  # known install paths, picking the first that meets the version floor.
+  find_python() {
+    local candidates=(
+      python3.13 python3.12 python3.11 python3.10
+      "$HOME/miniconda3/bin/python3.13"
+      "$HOME/miniconda3/bin/python3.12"
+      /opt/homebrew/bin/python3.13
+      /opt/homebrew/bin/python3.12
+      /usr/local/bin/python3.13
+      /usr/local/bin/python3.12
+      python3 python
+    )
+    for c in "${candidates[@]}"; do
+      local cmd
+      cmd=$(command -v "$c" 2>/dev/null || ([ -x "$c" ] && echo "$c"))
+      [ -z "$cmd" ] && continue
+      # Check version: major>3 OR (major==3 AND minor>=10).
+      if "$cmd" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
+        echo "$cmd"
+        return 0
+      fi
+    done
+    return 1
+  }
+
+  PY_BOOTSTRAP=$(find_python) || {
+    echo "✗ No Python >= 3.10 found." >&2
+    echo "  Install one of:" >&2
+    echo "    brew install python@3.13      (macOS)" >&2
+    echo "    https://www.python.org/downloads/   (any OS)" >&2
+    echo "  Stock macOS Python 3.9 is too old — mcp + several deps require >=3.10." >&2
+    exit 1
+  }
+  echo "→ Creating venv at $VENV using $PY_BOOTSTRAP ($("$PY_BOOTSTRAP" --version 2>&1))"
   "$PY_BOOTSTRAP" -m venv "$VENV"
   # Re-detect bin dir after creation.
   if [ -d "$VENV/Scripts" ]; then VENV_BIN="$VENV/Scripts"; EXE=".exe"; fi
