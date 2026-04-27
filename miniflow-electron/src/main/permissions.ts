@@ -20,6 +20,16 @@ export interface PermissionState {
 }
 
 export function getStatus(id: PermissionId): PermissionStatus {
+  if (process.platform !== "darwin") {
+    // Windows: only "microphone" maps to a real OS permission concept.
+    // Accessibility and Input Monitoring are macOS-specific gates; the Win
+    // helper uses WH_KEYBOARD_LL which has no equivalent permission. Calling
+    // isTrustedAccessibilityClient on Windows throws (not a function).
+    if (id === "microphone") {
+      return mapMediaStatus(systemPreferences.getMediaAccessStatus("microphone"));
+    }
+    return "granted";
+  }
   switch (id) {
     case "microphone":
       return mapMediaStatus(systemPreferences.getMediaAccessStatus("microphone"));
@@ -31,6 +41,13 @@ export function getStatus(id: PermissionId): PermissionStatus {
 }
 
 export function getAll(): PermissionState[] {
+  if (process.platform !== "darwin") {
+    // Windows has no Accessibility / Input-Monitoring concept; return an
+    // empty list so the renderer skips the permissions onboarding step.
+    // Microphone is granted lazily by the OS the first time the renderer
+    // calls getUserMedia, so there is nothing to request up front either.
+    return [];
+  }
   return [
     {
       id: "microphone",
@@ -55,6 +72,11 @@ export function getAll(): PermissionState[] {
 
 /** Attempt to request a permission. Returns the post-request status. */
 export async function request(id: PermissionId): Promise<PermissionStatus> {
+  if (process.platform !== "darwin") {
+    // askForMediaAccess is macOS-only; opening Settings panes via x-apple
+    // URLs is meaningless on Windows. Return whatever getStatus reports.
+    return getStatus(id);
+  }
   switch (id) {
     case "microphone": {
       await systemPreferences.askForMediaAccess("microphone");
