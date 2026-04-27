@@ -6,6 +6,14 @@
     <!-- No CSP: we load from file:// and only connect to 127.0.0.1:8765.
          The renderer has sandbox+contextIsolation, so this is safe. -->
 
+    <!-- Design pass 1 — Newsreader serif + Inter Tight sans + JetBrains Mono.
+         preconnect saves ~150ms on first font fetch. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;0,6..72,700;0,6..72,800;1,6..72,500&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Caveat:wght@500;700&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
