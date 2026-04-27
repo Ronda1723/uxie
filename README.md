@@ -58,7 +58,7 @@ After installing, sign in with your email (Uxie sends a 6-digit OTP via email; n
 
 ## Architecture
 
-```
+```text
        ┌────────────────────┐                   ┌────────────────────┐
        │  Electron main     │   spawn (stdio)   │  Python engine     │
        │  (TypeScript)      │ ─────────────────▶│  (FastAPI :8765,   │
@@ -68,13 +68,13 @@ After installing, sign in with your email (Uxie sends a 6-digit OTP via email; n
              ▼                                            ▼
        ┌────────────────────┐                   ┌────────────────────┐
        │  Rust helper       │                   │  Railway backend   │
-       │  (hotkey + typing) │                   │  (auth + LLM/STT   │
-       │   helper-mac /     │                   │   proxy + admin)   │
-       │   helper-win       │                   └─────────┬──────────┘
-       └────────────────────┘                             │
-                                                          ▼
+       │  (hotkey + typing) │                   │  (auth + LLM proxy │
+       │   helper-mac /     │                   │   + STT key mint   │
+       │   helper-win       │                   │   + admin)         │
+       └────────────────────┘                   └─────────┬──────────┘
+                                                          │  server-side
+                                                          ▼  master keys
                                           Deepgram · OpenAI · Groq
-                                          (server-side keys only)
 ```
 
 | Component | Stack | Where |
@@ -84,7 +84,10 @@ After installing, sign in with your email (Uxie sends a 6-digit OTP via email; n
 | Local agent + STT pipeline + connectors | Python + FastAPI + litellm | [`miniflow-engine/`](miniflow-engine/) |
 | Cloud backend (auth, LLM/STT proxy, admin dashboard) | Python + FastAPI on Railway | [`uxie-backend/`](uxie-backend/) |
 
-**Critical architectural rule** — see [`CLAUDE.md`](CLAUDE.md): *every* STT and LLM call goes through the Railway backend. The desktop app never holds Deepgram / OpenAI / Groq keys directly. The user logs in with email/OTP → gets a JWT → the engine uses it to ask Railway for short-lived scoped credentials per session.
+**Critical architectural rule** — see [`CLAUDE.md`](CLAUDE.md): the desktop app **never holds Deepgram / OpenAI / Groq master keys**. They live only in Railway env vars. Two flows that respect that rule:
+
+- **LLM** is fully proxied: client → Railway (`/llm/stream`, `/llm/chat`) → provider. Audio bytes / prompts travel through Railway.
+- **STT** uses an ephemeral-key handshake: client asks Railway (`/stt/session`) → gets a 5-minute scoped Deepgram key → opens the audio WebSocket *directly* to `wss://api.deepgram.com/v1/listen` with that key. Master Deepgram key never leaves Railway; the audio doesn't double-hop through us.
 
 ---
 
@@ -126,6 +129,8 @@ SKIP_BACKEND=1 SKIP_HELPER=1 SKIP_NPM_INSTALL=1 SKIP_RELEASE=1 bash build_electr
 
 ### Dev mode (no DMG / EXE, hot-reloading UI)
 
+**macOS / Linux:**
+
 ```bash
 # Terminal 1 — Python engine
 cd miniflow-engine && ./venv/bin/python main.py
@@ -136,7 +141,22 @@ cd miniflow-electron && npm run dev
 cd miniflow-electron && MINIFLOW_ENGINE_EXTERNAL=1 npm start
 ```
 
-The Rust helper is built once with `cargo build --release -p helper-mac` (or `-p helper-win`) — Electron spawns it from `target/release/`.
+**Windows (PowerShell or Git Bash):**
+
+```powershell
+# Terminal 1 — Python engine
+cd miniflow-engine
+.\venv\Scripts\python.exe main.py
+
+# Terminal 2 — Electron + Vite watcher
+cd miniflow-electron
+npm run dev
+# in another tab:
+cd miniflow-electron
+$env:MINIFLOW_ENGINE_EXTERNAL = "1"; npm start
+```
+
+The Rust helper is built once with `cargo build --release -p helper-mac` (macOS) or `cargo build --release -p helper-win` (Windows) — Electron spawns it from `native-helper/target/release/`.
 
 ---
 
@@ -172,19 +192,36 @@ Both upload as workflow artifacts. CI builds are intentionally **unsigned** (no 
 
 ## Tests
 
+**macOS / Linux:**
+
 ```bash
 # Python engine (agent + connectors + config)
 cd miniflow-engine && ./venv/bin/python -m pytest tests/ -v
 
-# Rust helper (per-platform)
-cd native-helper && cargo test -p helper-mac      # macOS
-cd native-helper && cargo test -p helper-win      # Windows
+# Rust helper
+cd native-helper && cargo test -p helper-mac
 
 # Electron renderer + main unit tests
 cd miniflow-electron && npm test
 
 # Backend (Railway code)
 cd uxie-backend && pytest
+```
+
+**Windows (PowerShell):**
+
+```powershell
+# Python engine
+cd miniflow-engine
+.\venv\Scripts\python.exe -m pytest tests/ -v
+
+# Rust helper
+cd native-helper
+cargo test -p helper-win
+
+# Electron + backend (same as Unix)
+cd ..\miniflow-electron; npm test
+cd ..\uxie-backend;     .\venv\Scripts\python.exe -m pytest
 ```
 
 ---
@@ -201,7 +238,10 @@ cd uxie-backend && pytest
 → Pre-Authenticode-signing. Click "More info → Run anyway."
 
 **No transcript appearing**
-→ `tail -f ~/miniflow/miniflow.log` (macOS) or `%LOCALAPPDATA%\Uxie\logs\miniflow.log` (Windows). Look for `Deepgram connected` lines.
+→ `tail -f ~/miniflow/miniflow.log` (macOS) or `%LOCALAPPDATA%\Uxie\logs\miniflow.log` (Windows). The signals to look for, in order:
+> 1. `POST .../stt/session "HTTP/1.1 200"` — Railway minted an ephemeral Deepgram key. If this is missing or non-200, the JWT may have expired (re-sign in via email OTP).
+> 2. `Deepgram connected (sample_rate=16000)` — engine opened the audio WebSocket directly to Deepgram with that key. Per the architectural rule, audio bytes do not go through Railway; only the master key stays server-side.
+> 3. `Deepgram final raw (...)` lines — actual transcripts coming back. If steps 1+2 succeed but step 3 is empty / says "did not receive audio", the mic isn't being captured (permission issue or wrong input device).
 
 **Engine fails to start**
 → Check the same log. Most common: an OS-update reset Python permissions, or the JWT in `~/miniflow/uxie_auth.json` expired (re-sign in via email OTP).
