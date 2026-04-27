@@ -5,6 +5,15 @@ directories:
   buildResources: resources
   output: dist
 
+# Drives both electron-builder's release upload (when invoked with
+# --publish always / onTagOrDraft) AND the runtime feed electron-updater
+# checks. The same `latest.yml` + .exe.blockmap is used for both.
+publish:
+  provider: github
+  owner: uxie-app
+  repo: uxie-releases
+  releaseType: release
+
 files:
   - build/**/*
   - package.json

@@ -36,6 +36,7 @@ import { invoke } from "./api";
 import { IpcChannels } from "../shared/types";
 import { createOverlayWindow } from "./overlayWindow";
 import { getFrontmostAppId, hideDockIcon } from "./platform";
+import { autoUpdater } from "electron-updater";
 
 // Hide from dock on macOS (no-op on Windows). LSUIElement in Info.plist
 // also enforces this on macOS.
@@ -52,6 +53,22 @@ app.whenReady().then(async () => {
     await startEngine();
   } catch (e) {
     console.error("Engine failed to start:", e);
+  }
+
+  // Auto-update: Windows-only for now. The macOS auto-update path needs a
+  // signed/notarized DMG (Apple Developer cert), which we don't have yet —
+  // calling autoUpdater there would just log noisy signature errors. Wire
+  // Mac in later when the cert lands. Skipped in dev (app.isPackaged false).
+  if (app.isPackaged && process.platform === "win32") {
+    autoUpdater.logger = {
+      info:  (m: any) => _log(`[updater] info: ${m}`),
+      warn:  (m: any) => _log(`[updater] warn: ${m}`),
+      error: (m: any) => _log(`[updater] error: ${m?.stack ?? m}`),
+      debug: (_m: any) => {},
+    } as any;
+    autoUpdater.checkForUpdatesAndNotify().catch((e) =>
+      _log(`[updater] checkForUpdatesAndNotify failed: ${e?.stack ?? e}`)
+    );
   }
 
   createTray();
