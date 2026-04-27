@@ -49,10 +49,15 @@ echo "→ Python: $("$PYTHON" --version)"
 
 # Install requirements if the venv is empty/stale. Cheap to re-run; pip
 # is a no-op when everything's already at the pinned version.
+#
+# IMPORTANT: upgrade pip via `python -m pip`, not the pip executable
+# directly. On Windows, pip.exe can't overwrite its own running binary
+# and the upgrade fails with "to modify pip, please run python -m pip".
+# Same command works on macOS, so we use it everywhere.
 echo "→ Ensuring requirements installed..."
-"$PIP" install --quiet --upgrade pip
-"$PIP" install --quiet -r "$ENGINE_DIR/requirements.txt"
-"$PIP" install --quiet --upgrade pyinstaller
+"$PYTHON" -m pip install --quiet --upgrade pip
+"$PYTHON" -m pip install --quiet -r "$ENGINE_DIR/requirements.txt"
+"$PYTHON" -m pip install --quiet --upgrade pyinstaller
 
 PYINSTALLER="$VENV_BIN/pyinstaller$EXE"
 
