@@ -65,7 +65,13 @@ fi
 
 echo ""
 echo "━━━ Step 3/4: Electron compile ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-export PATH="/opt/homebrew/bin:/opt/homebrew/Cellar/node/24.1.0/bin:/usr/local/bin:$PATH"
+# Mac-only PATH prepends — Homebrew location for node etc. Harmless on
+# Windows (paths just don't exist) but guarding for clarity.
+case "$(uname -s)" in
+  Darwin)
+    export PATH="/opt/homebrew/bin:/opt/homebrew/Cellar/node/24.1.0/bin:/usr/local/bin:$PATH"
+    ;;
+esac
 cd "$ELECTRON_DIR"
 if [ "${SKIP_NPM_INSTALL:-0}" != "1" ]; then
   npm install
@@ -75,16 +81,36 @@ npm run build
 # ── Step 4: electron-builder packaging ────────────────────────────────────────
 
 echo ""
-echo "━━━ Step 4/4: electron-builder DMG ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-npx electron-builder --mac --arm64
+echo "━━━ Step 4/4: electron-builder packaging ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 VERSION=$(node -p "require('./package.json').version")
-DMG="$ELECTRON_DIR/dist/Uxie-${VERSION}-arm64.dmg"
+
+case "$(uname -s)" in
+  Darwin)
+    BUILDER_FLAGS="--mac --arm64"
+    ARTIFACT_GLOB="$ELECTRON_DIR/dist/Uxie-${VERSION}-arm64.dmg"
+    ARTIFACT_LABEL="DMG"
+    ;;
+  Linux|MINGW*|MSYS*|CYGWIN*)
+    BUILDER_FLAGS="--win --x64"
+    # electron-builder.yml's win.artifactName resolves to
+    # "Uxie-<version>-x64.exe" for the NSIS installer.
+    ARTIFACT_GLOB="$ELECTRON_DIR/dist/Uxie-${VERSION}-x64.exe"
+    ARTIFACT_LABEL="EXE installer"
+    ;;
+  *)
+    echo "✗ Unsupported host OS for electron-builder: $(uname -s)" >&2
+    exit 1
+    ;;
+esac
+
+echo "  host=$(uname -s)  electron-builder $BUILDER_FLAGS"
+npx electron-builder $BUILDER_FLAGS
 
 echo ""
 echo "┌─────────────────────────────────────────────────────────┐"
 echo "│  ✓ Build complete"
-echo "│  DMG: $DMG"
+echo "│  $ARTIFACT_LABEL: $ARTIFACT_GLOB"
 echo "└─────────────────────────────────────────────────────────┘"
 ls -la "$ELECTRON_DIR/dist/" 2>/dev/null || true
 
@@ -121,9 +147,10 @@ else
   sleep 10
 fi
 
-# Upload DMG via curl with retry + rate limit (large file, flaky Wi-Fi friendly)
+# Upload artifact via curl with retry + rate limit (large file, flaky Wi-Fi friendly)
 UPLOAD_URL=$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.upload_url' | sed 's/{?name,label}//')
 TOKEN=$(gh auth token)
+DMG="$ARTIFACT_GLOB"   # name kept for backwards compat below; holds DMG on Mac, EXE on Win
 DMG_NAME="$(basename "$DMG")"
 
 echo "→ Uploading $DMG_NAME ($(du -sh "$DMG" | cut -f1))..."
