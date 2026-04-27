@@ -7,17 +7,21 @@
 //!   stdout (one JSON object per line):
 //!     {"type":"press",   "mode":"dictation"}
 //!     {"type":"release", "mode":"dictation"}
+//!     {"type":"toggle",  "mode":"command", "on":true}
 //!     {"type":"error",   "message":"..."}        # incl. "ready" on startup
 //!
 //!   stdin (one JSON object per line):
 //!     {"action":"type", "text":"hello"}
 //!     {"action":"quit"}
 //!
-//! Hotkey: Right-Alt (VK_RMENU). Chosen because:
-//!   - macOS uses `fn`, which Windows can't intercept (firmware-level on most
-//!     laptops)
-//!   - Right-Alt is rare enough that nobody has muscle memory for it
-//!   - Easy to hold-to-talk with one hand
+//! Hotkeys:
+//!   - Dictation: Right-Alt (VK_RMENU), hold-to-talk. Press emits "press",
+//!     release emits "release". Mac analog: hold `fn`.
+//!   - Command:   Right-Ctrl (VK_RCONTROL), tap-to-toggle. A "tap" is
+//!     keydown→keyup with NO other key pressed in between, so Ctrl+C /
+//!     Ctrl+V etc. still behave normally. Each clean tap flips the latch
+//!     and emits {"type":"toggle","mode":"command","on":<state>}. Mac
+//!     analog: tap Option+Space.
 //!
 //! Implementation: WH_KEYBOARD_LL (low-level keyboard hook). Required because
 //! we need to detect the key globally, even when our window isn't focused —
@@ -36,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_RMENU,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_RCONTROL, VK_RMENU,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
@@ -51,6 +55,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 enum OutEvent {
     Press { mode: String },
     Release { mode: String },
+    Toggle { mode: String, on: bool },
     Error { message: String },
 }
 
@@ -71,10 +76,18 @@ fn emit(ev: &OutEvent) {
 
 // ── Hotkey state ─────────────────────────────────────────────────────────────
 // The low-level keyboard hook callback runs on the message-pump thread and
-// can't carry user data, so the press latch is global. This is the standard
+// can't carry user data, so all hotkey latches are global. This is the standard
 // pattern for WH_KEYBOARD_LL on Windows.
 
+// Right-Alt: dictation hold-to-talk
 static PRESSED: AtomicBool = AtomicBool::new(false);
+
+// Right-Ctrl: command tap-to-toggle. A clean tap is keydown→keyup with no
+// other key pressed in between. RCTRL_DOWN tracks the hold; RCTRL_TAP_VALID
+// is set on keydown and cleared the moment any other key fires while held.
+static RCTRL_DOWN:      AtomicBool = AtomicBool::new(false);
+static RCTRL_TAP_VALID: AtomicBool = AtomicBool::new(false);
+static COMMAND_ON:      AtomicBool = AtomicBool::new(false);
 
 unsafe extern "system" fn keyboard_hook_proc(
     code: i32,
@@ -85,21 +98,43 @@ unsafe extern "system" fn keyboard_hook_proc(
         let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
         let vk = VIRTUAL_KEY(kb.vkCode as u16);
         let msg = wparam.0 as u32;
+        let is_keydown = matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN);
+        let is_keyup   = matches!(msg, WM_KEYUP   | WM_SYSKEYUP);
+
+        // If anything OTHER than Right-Ctrl goes down while Right-Ctrl is held,
+        // this is no longer a clean tap — kill the latch so Ctrl+C / Ctrl+V
+        // don't accidentally toggle command mode.
+        if is_keydown && vk != VK_RCONTROL && RCTRL_DOWN.load(Ordering::SeqCst) {
+            RCTRL_TAP_VALID.store(false, Ordering::SeqCst);
+        }
 
         if vk == VK_RMENU {
             // Alt comes through as WM_SYSKEY*, plain keys as WM_KEY*. Cover both.
-            match msg {
-                WM_KEYDOWN | WM_SYSKEYDOWN => {
-                    if !PRESSED.swap(true, Ordering::SeqCst) {
-                        emit(&OutEvent::Press { mode: "dictation".into() });
-                    }
+            if is_keydown {
+                if !PRESSED.swap(true, Ordering::SeqCst) {
+                    emit(&OutEvent::Press { mode: "dictation".into() });
                 }
-                WM_KEYUP | WM_SYSKEYUP => {
-                    if PRESSED.swap(false, Ordering::SeqCst) {
-                        emit(&OutEvent::Release { mode: "dictation".into() });
-                    }
+            } else if is_keyup {
+                if PRESSED.swap(false, Ordering::SeqCst) {
+                    emit(&OutEvent::Release { mode: "dictation".into() });
                 }
-                _ => {}
+            }
+        } else if vk == VK_RCONTROL {
+            if is_keydown {
+                // OS auto-repeat hits this many times; stores are idempotent.
+                RCTRL_DOWN.store(true, Ordering::SeqCst);
+                RCTRL_TAP_VALID.store(true, Ordering::SeqCst);
+            } else if is_keyup {
+                let was_down = RCTRL_DOWN.swap(false, Ordering::SeqCst);
+                let was_tap  = RCTRL_TAP_VALID.swap(false, Ordering::SeqCst);
+                if was_down && was_tap {
+                    let new_state = !COMMAND_ON.load(Ordering::SeqCst);
+                    COMMAND_ON.store(new_state, Ordering::SeqCst);
+                    emit(&OutEvent::Toggle {
+                        mode: "command".into(),
+                        on: new_state,
+                    });
+                }
             }
         }
     }
