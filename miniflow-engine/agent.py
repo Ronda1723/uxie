@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import subprocess
+import sys
 from datetime import datetime
 from typing import Callable, Any
 
@@ -25,6 +26,11 @@ import oauth
 from connectors import registry as connector_registry
 
 log = logging.getLogger("agent")
+
+# Windows port: every branch gated by this constant returns before any of the
+# macOS-only code (osascript, `open -a`, mdfind, PyObjC) is reached. Mac code
+# paths are unchanged.
+_IS_WIN = sys.platform.startswith("win")
 _broadcaster: Callable | None = None
 _target_bundle_id: str | None = None
 _target_page_url: str | None = None  # set for browser tabs at recording start
@@ -133,6 +139,11 @@ def capture_selected_text():
 
 def _read_selected_text() -> str:
     """Use pyobjc Accessibility API to get AXSelectedText from the frontmost app."""
+    if _IS_WIN:
+        # Windows: no equivalent of AXSelectedText / NSWorkspace yet. Returning
+        # "" makes the transform-text flow gracefully bail (it requires a
+        # non-empty selection). Open/quit/launch commands are unaffected.
+        return ""
     try:
         import AppKit
         from ApplicationServices import (
@@ -164,6 +175,35 @@ async def _emit(event: str, payload: Any):
 
 
 # ── System prompt (ported 1:1 from agent.rs) ──
+
+# Prepended as an additional system message ONLY on Windows. SYSTEM_PROMPT
+# itself is not modified, so the Mac code path sends exactly the original
+# message it always has.
+WIN_PLATFORM_OVERRIDE = """[PLATFORM CONTEXT — READ FIRST]
+This Uxie session is running on Windows, NOT macOS. The system prompt below
+mentions "macOS", "Finder", "Safari", and macOS app names — those are stale.
+On this machine:
+- open_application launches Windows applications by name. Common targets:
+  Notepad, Calculator, Chrome, Edge, Word, Excel, Spotify, Discord, Slack.
+  Always call open_application for "open X" where X is an app — never return
+  DICTATION for app-launch commands.
+- quit_application closes a running Windows application.
+- open_browser_tab opens a URL in the default Windows browser (typically Edge
+  or Chrome).
+- search_google opens a Google search in the default browser.
+- open_finder opens a folder in File Explorer (the tool name is historical;
+  it works on Windows).
+- create_file / move_file / clipboard_read / clipboard_write all work on
+  Windows.
+Mapping examples:
+- "Open Notepad" → open_application(name="Notepad")
+- "Open Chrome" → open_application(name="Chrome")
+- "Open YouTube" → open_browser_tab(url="https://youtube.com")
+- "Open downloads folder" → open_finder(path="downloads")
+- "Quit Chrome" → quit_application(name="Chrome")
+Treat any "Finder" reference in the prompt below as "File Explorer", and any
+macOS app reference as the closest Windows equivalent. Otherwise the rules
+below apply unchanged."""
 
 SYSTEM_PROMPT = """You are Uxie, a voice-powered desktop agent for macOS. The user speaks and you decide what to do.
 
@@ -315,7 +355,90 @@ def _run(cmd: list[str]) -> str:
         return str(e)
 
 
+def _execute_local_windows(name: str, args: dict) -> tuple[bool, str] | None:
+    """Windows implementations of the 5 OS-shell tools that on Mac call
+    osascript / `open -a`. Returns None for tools handled by the (unchanged)
+    Mac block below — those are cross-platform (clipboard via pyperclip,
+    create_file/move_file via plain Python) so they fall through.
+    """
+    import os
+    if name == "open_application":
+        # `start "" <name>` lets the Windows shell resolve App Paths registry,
+        # PATH, and known apps (e.g. "notepad" → notepad.exe). DETACHED_PROCESS
+        # so the child doesn't die when our subprocess exits.
+        try:
+            subprocess.Popen(
+                ["cmd", "/c", "start", "", args["name"]],
+                creationflags=getattr(subprocess, "DETACHED_PROCESS", 0),
+            )
+            return True, f"Opened {args['name']}"
+        except Exception as e:
+            return False, f"Failed to open {args['name']}: {e}"
+    if name == "quit_application":
+        # taskkill matches by image name; users say "Notepad" but the exe is
+        # "notepad.exe", so try both spellings.
+        target = args["name"]
+        candidates = [target, target if target.lower().endswith(".exe") else f"{target}.exe"]
+        for image in candidates:
+            r = subprocess.run(
+                ["taskkill", "/IM", image, "/F"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0:
+                return True, f"Quit {target}"
+        return False, f"Could not quit {target} (not running?)"
+    if name == "open_browser_tab":
+        # os.startfile on a URL hands it to the user's default browser. We
+        # don't force Chrome here because Edge/Firefox/etc. are equally fine
+        # on Windows and the user's default is usually what they want.
+        try:
+            os.startfile(args["url"])
+            return True, f"Opened {args['url']}"
+        except Exception as e:
+            return False, f"Failed to open URL: {e}"
+    if name == "search_google":
+        import urllib.parse
+        url = f"https://www.google.com/search?q={urllib.parse.quote(args['query'])}"
+        try:
+            os.startfile(url)
+            return True, f"Searched for: {args['query']}"
+        except Exception as e:
+            return False, f"Failed to open search: {e}"
+    if name == "open_finder":
+        # Windows Explorer equivalents of the macOS shortcuts. We only map
+        # the ones with a real Windows analog; "/Applications", "iCloud",
+        # ".Trash" don't translate.
+        raw = (args.get("path") or "~").strip()
+        win_shortcuts = {
+            "home": "~", "~": "~",
+            "downloads": "~\\Downloads", "download": "~\\Downloads",
+            "desktop": "~\\Desktop",
+            "documents": "~\\Documents", "docs": "~\\Documents",
+            "movies": "~\\Videos", "videos": "~\\Videos",
+            "music": "~\\Music",
+            "pictures": "~\\Pictures", "photos": "~\\Pictures",
+            "tmp": os.environ.get("TEMP", "C:\\Windows\\Temp"),
+            "temp": os.environ.get("TEMP", "C:\\Windows\\Temp"),
+        }
+        path = win_shortcuts.get(raw.lower(), raw)
+        path = os.path.expanduser(path)
+        if not os.path.exists(path):
+            return False, f"No such folder: {path}"
+        try:
+            subprocess.Popen(["explorer", path])
+            return True, f"Opened Explorer at {path}"
+        except Exception as e:
+            return False, f"Failed to open Explorer: {e}"
+    return None  # Fall through to cross-platform handlers below.
+
+
 def _execute_local(name: str, args: dict) -> tuple[bool, str]:
+    if _IS_WIN:
+        windows_result = _execute_local_windows(name, args)
+        if windows_result is not None:
+            return windows_result
+        # Else fall through: clipboard_*, create_file, move_file all work on
+        # Windows via the cross-platform pyperclip / plain-Python paths below.
     import pyperclip
     try:
         if name == "open_browser_tab":
@@ -398,6 +521,10 @@ def _extract_filenames(text: str) -> list[str]:
 
 
 def _find_and_read(filename: str) -> tuple[str, str] | None:
+    if _IS_WIN:
+        # mdfind is macOS-only. File-context auto-injection is a nice-to-have,
+        # not required for command-mode actions; skip on Windows for v1.
+        return None
     import os
     home = os.path.expanduser("~")
     result = subprocess.run(
@@ -774,8 +901,12 @@ async def execute_command(text: str) -> list[dict]:
 
     messages: list[dict] = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_msg},
     ]
+    if _IS_WIN:
+        # Override the macOS framing with Windows-specific tool guidance.
+        # Appended AFTER the main prompt so it has the last word.
+        messages.append({"role": "system", "content": WIN_PLATFORM_OVERRIDE})
+    messages.append({"role": "user", "content": user_msg})
 
     # Build tool list: local + OAuth connectors (Google, Slack) + MCP (GitHub, Linear, Notion, Playwright)
     import mcp_client
