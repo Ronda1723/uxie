@@ -1,104 +1,151 @@
-# MiniFlow
+# Uxie
 
-Voice-powered desktop agent for macOS. Hold your hotkey (default: **Fn**) to speak — MiniFlow transcribes, understands, and acts.
+Voice-powered desktop agent. Hold a hotkey, speak — Uxie transcribes, understands, and acts.
+
+- macOS · hold **Fn**
+- Windows · hold **Right-Alt** (`fn` is firmware-level on Windows laptops and not interceptable)
+
+> Source is private (`uxie-app/uxie`). Installers + DMGs/EXEs are published to the public [`uxie-app/uxie-releases`](https://github.com/uxie-app/uxie-releases).
 
 ---
 
 ## What it does
 
-- **Voice commands** — "Send a Slack message to John saying I'll be late" → done
-- **Dictation** — hold the hotkey anywhere, speak, release — text is typed at your cursor
-- **App integrations** — Slack, Gmail, Google Calendar, GitHub, Notion, Linear, Jira, Spotify, Discord
-- **Any LLM** — OpenAI, Anthropic, Gemini, Groq, OpenRouter, or local Ollama — you pick
-- **Always available** — lives in your menu bar, no window to manage
+- **Dictation** — hold the hotkey anywhere, speak, release. Grammar-corrected text appears at your cursor.
+- **Voice commands** — *"send a Slack message to John saying I'll be late"*, *"what's on my calendar tomorrow?"*, *"open my Downloads folder"*. Routed through tool-calling LLMs.
+- **App connectors** — Slack · Gmail · Google Calendar · Drive · GitHub · Notion · Linear · Jira · Spotify · Discord
+- **Always available** — lives in your menu bar / system tray, no window to manage
 
 ---
 
-## Architecture (v0.4 and later)
+## Install
 
-```
-┌────────────────────┐   child_process.spawn    ┌────────────────────┐
-│  Electron main     │ ───────────────────────▶ │  Python backend    │
-│  (Node.js)         │ ◀─── WebSocket /ws ───── │  (FastAPI :8765)   │
-│                    │ ───  HTTP  /invoke ────▶ │                    │
-│                    │                          │  connectors/ …     │
-│  Rust native       │                          │  llm.py (litellm)  │
-│  helper via stdin/ │                          │                    │
-│  stdout (hotkey)   │                          │                    │
-└────────────────────┘                          └────────────────────┘
-         ▲
-         │
-    macOS menu bar tray + popover UI (React)
+### macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/uxie-app/uxie-releases/main/install.sh | bash
 ```
 
-Three independent pieces, each testable on its own:
+The script downloads the latest signed DMG, copies Uxie to `/Applications`, and clears Gatekeeper's quarantine flag (Uxie is signed but not yet Apple-notarized — that ships with the new Apple Developer account).
+
+Manual fallback or full install instructions: [INSTALL.md](INSTALL.md).
+
+### Windows
+
+Download `Uxie-<version>-x64.exe` from the [latest release](https://github.com/uxie-app/uxie-releases/releases/latest), run it, accept the SmartScreen warning ("More info → Run anyway" — the build isn't Authenticode-signed yet).
+
+> ⚠️ Apple-notarization on macOS and Authenticode signing on Windows are both deliberately deferred. Both add per-year cert costs and a verification flow that we'll adopt before public launch. Until then, the install scripts above handle the Gatekeeper / SmartScreen friction.
+
+---
+
+## First launch
+
+You'll be asked for permissions. **Grant all of them** or the hotkey won't work:
+
+| Permission | Why |
+|---|---|
+| **Microphone** | record dictation audio |
+| **Accessibility** *(macOS)* | type the transcript into the focused app |
+| **Input Monitoring** *(macOS)* | detect the global Fn key |
+
+On Windows, the equivalent prompts (mic + accessibility-style global hook permission) come up the first time you press Right-Alt.
+
+After installing, sign in with your email (Uxie sends a 6-digit OTP via email; no passwords). The JWT is stored locally in your Keychain (macOS) / DPAPI (Windows). All STT and LLM calls go through Uxie's Railway backend — **no API keys to configure**.
+
+---
+
+## Architecture
+
+```
+       ┌────────────────────┐                   ┌────────────────────┐
+       │  Electron main     │   spawn (stdio)   │  Python engine     │
+       │  (TypeScript)      │ ─────────────────▶│  (FastAPI :8765,   │
+       │  ◀──── ws ───────  │ ◀── ws  /ws ─────│   PyInstaller bin) │
+       └─────┬──────────────┘                   └─────────┬──────────┘
+             │ spawn (stdio)                              │ HTTPS + JWT
+             ▼                                            ▼
+       ┌────────────────────┐                   ┌────────────────────┐
+       │  Rust helper       │                   │  Railway backend   │
+       │  (hotkey + typing) │                   │  (auth + LLM/STT   │
+       │   helper-mac /     │                   │   proxy + admin)   │
+       │   helper-win       │                   └─────────┬──────────┘
+       └────────────────────┘                             │
+                                                          ▼
+                                          Deepgram · OpenAI · Groq
+                                          (server-side keys only)
+```
 
 | Component | Stack | Where |
 |---|---|---|
-| Desktop shell | Electron + TypeScript + React | [`miniflow-electron/`](miniflow-electron/) |
-| Native hotkey + typing helper | Rust (`CGEventTap`) | [`native-helper/`](native-helper/) |
-| Agent + STT + connectors | Python + FastAPI + litellm | [`miniflow-engine/`](miniflow-engine/) |
-| OAuth proxy | Node.js on Vercel | [`miniflow-auth/`](miniflow-auth/) |
+| Desktop shell | Electron + TypeScript + React + Vite | [`miniflow-electron/`](miniflow-electron/) |
+| Native hotkey + typing helper (Cargo workspace) | Rust | [`native-helper/helper-mac/`](native-helper/helper-mac/) · [`native-helper/helper-win/`](native-helper/helper-win/) |
+| Local agent + STT pipeline + connectors | Python + FastAPI + litellm | [`miniflow-engine/`](miniflow-engine/) |
+| Cloud backend (auth, LLM/STT proxy, admin dashboard) | Python + FastAPI on Railway | [`uxie-backend/`](uxie-backend/) |
 
-The previous Swift/SwiftUI shell has been retired.
+**Critical architectural rule** — see [`CLAUDE.md`](CLAUDE.md): *every* STT and LLM call goes through the Railway backend. The desktop app never holds Deepgram / OpenAI / Groq keys directly. The user logs in with email/OTP → gets a JWT → the engine uses it to ask Railway for short-lived scoped credentials per session.
 
 ---
 
-## Prerequisites
+## Build from source
 
-| Requirement | Minimum |
+### Prerequisites (any platform)
+
+| Tool | Version |
 |---|---|
-| macOS | Ventura 13.0 or later |
-| Architecture | Apple Silicon (arm64) |
-| Node.js | 20.x LTS |
-| Rust | 1.75 or later |
-| Python | 3.10+ (only for building from source) |
+| Node | 20 LTS |
+| Python | 3.10 or newer (stock macOS 3.9 is too old for `mcp`) |
+| Rust | stable (`rustup default stable`) |
+| Git | any recent |
+
+**macOS additionally:** Xcode command-line tools (`xcode-select --install`).
+**Windows additionally:** Visual Studio Build Tools 2022 with **Desktop development with C++** workload (Rust + native module compilation).
+
+### Build the whole stack
+
+```bash
+git clone https://github.com/uxie-app/uxie.git
+cd uxie
+bash build_electron.sh
+```
+
+This script auto-detects the host OS via `uname -s` and:
+
+1. Bootstraps `miniflow-engine/venv` if missing, installs `requirements.txt`, runs PyInstaller → `miniflow-engine/dist/miniflow-engine/`
+2. Builds the right Rust crate (`helper-mac` on Darwin, `helper-win` on MINGW/MSYS/CYGWIN) → `native-helper/target/release/miniflow-fn-helper(.exe)`
+3. Compiles the Electron renderer + main → `miniflow-electron/build/`
+4. Packages with `electron-builder` → `miniflow-electron/dist/Uxie-<version>-arm64.dmg` *(macOS)* or `Uxie-<version>-x64.exe` *(Windows NSIS installer)*
+5. Optionally creates / uploads to a GitHub Release in `uxie-app/uxie-releases`
+
+### Skip-flags for incremental builds
+
+```bash
+SKIP_BACKEND=1 SKIP_HELPER=1 SKIP_NPM_INSTALL=1 SKIP_RELEASE=1 bash build_electron.sh
+```
+
+### Dev mode (no DMG / EXE, hot-reloading UI)
+
+```bash
+# Terminal 1 — Python engine
+cd miniflow-engine && ./venv/bin/python main.py
+
+# Terminal 2 — Electron + Vite watcher
+cd miniflow-electron && npm run dev
+# in another tab:
+cd miniflow-electron && MINIFLOW_ENGINE_EXTERNAL=1 npm start
+```
+
+The Rust helper is built once with `cargo build --release -p helper-mac` (or `-p helper-win`) — Electron spawns it from `target/release/`.
 
 ---
 
-## Installation (from DMG)
+## CI
 
-1. Open the DMG and drag **MiniFlow.app** into **Applications**.
-2. Run once, from Terminal, to clear the Gatekeeper quarantine flag:
-   ```bash
-   xattr -cr /Applications/MiniFlow.app && open /Applications/MiniFlow.app
-   ```
-3. On first launch, macOS will ask for:
-   - **Microphone** — voice input
-   - **Input Monitoring** — hotkey detection (the Rust helper needs this)
-   - **Accessibility** — typing dictated text into the frontmost app
+`.github/workflows/build.yml` runs on `workflow_dispatch`:
 
-Re-enable any denied permission under **System Settings → Privacy & Security**.
+- `build-macos` — macOS-14 arm64 runner → produces `Uxie-<version>-arm64.dmg`
+- `build-windows` — windows-latest x64 runner → produces `Uxie-<version>-x64.exe`
 
----
-
-## Pick your LLM
-
-Open the MiniFlow popover → **LLM Providers** tab. Pick a provider, paste your API key, pick a model, click Save. Keys are stored in the macOS Keychain (service `miniflow-llm`).
-
-| Provider | Key source |
-|---|---|
-| OpenAI | [platform.openai.com](https://platform.openai.com) |
-| Anthropic | [console.anthropic.com](https://console.anthropic.com) |
-| Google Gemini | [aistudio.google.com](https://aistudio.google.com) |
-| Groq | [console.groq.com](https://console.groq.com) |
-| OpenRouter | [openrouter.ai](https://openrouter.ai) |
-| Ollama (local) | No key — install [ollama.com](https://ollama.com) and pull a tool-capable model |
-
-**Ollama tool-capable models:** `llama3.1`, `llama3.2`, `qwen2.5`, `mistral-nemo`. The model picker warns you if you pick one that won't work.
-
-You still need a **Smallest AI** key for speech-to-text ([waves.smallest.ai](https://waves.smallest.ai)).
-
----
-
-## Customize the hotkey
-
-Open **Hotkey** tab:
-
-- **Fn (default)** — hold-to-talk. Works exactly as before.
-- **Custom:** click the recorder, press any `<modifier> + <key>` combination (e.g. ⌘ + Space, ⌥ + D). Pick **Hold to talk** or **Press to toggle** mode.
-
-Config lives in `~/miniflow/hotkey.json`. The Rust helper re-reads it on `SIGHUP` so changes apply instantly.
+Both upload as workflow artifacts. CI builds are intentionally **unsigned** (no Developer ID cert / Authenticode cert in the runners yet); local `build_electron.sh` runs are signed via your Keychain.
 
 ---
 
@@ -106,104 +153,79 @@ Config lives in `~/miniflow/hotkey.json`. The Rust helper re-reads it on `SIGHUP
 
 | Action | Result |
 |---|---|
-| **Hold Fn** (or your hotkey) | Start listening |
-| **Release Fn** | Stop — command is processed |
-| **Click menu bar icon** | Open / close the settings popover |
-| **Right-click menu bar** | Quit |
+| **Hold** *Fn (mac) / Right-Alt (win)* | Start listening |
+| **Release** | Stop — transcript is corrected and typed |
+| **Click menu-bar / tray icon** | Open / close the popover |
+| **Right-click menu-bar / tray icon** | Quit |
 
 ### Example commands
 
 - "Draft an email to Sarah about the project update"
 - "Create a GitHub issue: login page is broken"
 - "Add a task in Linear: refactor auth module, high priority"
-- "Play something relaxing on Spotify"
 - "What's on my calendar tomorrow?"
+- "Open my Downloads folder"
 
 ---
 
-## Connecting integrations
-
-**LLM Providers** tab configures the model.
-**(Future)** Integrations tab connects your Slack / Gmail / etc. via OAuth. Until the Electron integrations UI lands, use the Python backend's `start_oauth` endpoint directly:
+## Tests
 
 ```bash
-curl -X POST http://127.0.0.1:8765/invoke/start_oauth \
-  -H "Content-Type: application/json" \
-  -d '{"provider":"slack"}'
-```
+# Python engine (agent + connectors + config)
+cd miniflow-engine && ./venv/bin/python -m pytest tests/ -v
 
-Supported: Slack · Gmail · Google Calendar · Google Drive · GitHub · Notion · Linear · Jira · Spotify · Discord.
+# Rust helper (per-platform)
+cd native-helper && cargo test -p helper-mac      # macOS
+cd native-helper && cargo test -p helper-win      # Windows
 
----
-
-## Building from source
-
-```bash
-git clone https://github.com/Ronda1723/Miniflow.git
-cd Miniflow
-
-# One-shot build: PyInstaller + cargo + electron-builder → DMG
-./build_electron.sh
-```
-
-Output: `miniflow-electron/dist/MiniFlow-0.4.0.dmg`.
-
-Env-var knobs: `SKIP_BACKEND=1`, `SKIP_HELPER=1`, `SKIP_NPM_INSTALL=1`.
-
-### Dev mode (no DMG, no packaging)
-
-```bash
-# Terminal 1 — Python backend
-cd miniflow-engine && ./venv/bin/python main.py
-
-# Terminal 2 — Rust helper (separate so you can see its logs)
-cd native-helper && cargo build --release
-./target/release/miniflow-fn-helper        # not strictly needed; Electron spawns it
-
-# Terminal 3 — Electron dev server + main watcher
-cd miniflow-electron && npm run dev
-# in another tab:
-cd miniflow-electron && MINIFLOW_ENGINE_EXTERNAL=1 npm start
-```
-
----
-
-## Running the tests
-
-```bash
-# Python agent + config + hotkey + connectors  (43 tests)
-cd miniflow-engine && env -u SSL_CERT_FILE -u REQUESTS_CA_BUNDLE \
-  ./venv/bin/python -m pytest tests/ -v
-
-# Rust native helper                           (6 tests)
-cd native-helper && cargo test
-
-# Electron renderer + main-process unit tests  (22 tests)
+# Electron renderer + main unit tests
 cd miniflow-electron && npm test
 
-# Electron end-to-end (requires a built app + backend)
-cd miniflow-electron && npm run build && npm run test:e2e
+# Backend (Railway code)
+cd uxie-backend && pytest
 ```
-
-See [TESTING.md](TESTING.md) for the full UI + functional test plan.
 
 ---
 
 ## Troubleshooting
 
-**App doesn't respond to the hotkey**
-→ Check **Input Monitoring** (for the helper) and **Accessibility** (for typing) in System Settings → Privacy & Security. The helper writes its PID to `~/miniflow/miniflow-fn-helper.pid`.
+**Hotkey does nothing after install (macOS)**
+→ System Settings → Privacy & Security → **Input Monitoring** AND **Accessibility** — toggle Uxie ON in both. Macros and re-installs reset these.
 
-**Transcription never starts**
-→ Check Microphone permission. Verify your Smallest AI key is set (Settings → LLM Providers is only about the agent LLM; STT is separate).
+**"Damaged, move to trash" warning on macOS**
+→ Pre-notarization. Run `xattr -dr com.apple.quarantine /Applications/Uxie.app`.
 
-**"Engine failed to start"**
-→ Tail the log: `tail -f ~/miniflow/miniflow.log`. Usually an expired API key or a network block on `localhost:8765`.
+**SmartScreen warning on Windows**
+→ Pre-Authenticode-signing. Click "More info → Run anyway."
 
-**Model refuses to call tools (Ollama)**
-→ You picked a model without tool-calling support. Use one of: `llama3.1`, `llama3.2`, `qwen2.5`, `mistral-nemo`.
+**No transcript appearing**
+→ `tail -f ~/miniflow/miniflow.log` (macOS) or `%LOCALAPPDATA%\Uxie\logs\miniflow.log` (Windows). Look for `Deepgram connected` lines.
 
-**Logs**
-```bash
-tail -f ~/miniflow/miniflow.log
-```
+**Engine fails to start**
+→ Check the same log. Most common: an OS-update reset Python permissions, or the JWT in `~/miniflow/uxie_auth.json` expired (re-sign in via email OTP).
+
+**Windows installer hangs mid-way**
+→ Likely antivirus quarantining the bundled PyInstaller binary. Open Windows Security → Protection History — whitelist `Uxie.exe` and `miniflow-engine.exe` and re-run.
+
+---
+
+## Status & roadmap
+
+**Stable today (macOS):** dictation, commands, app connectors, admin dashboard, audio + transcript debug logging.
+
+**Stable today (Windows):** dictation, commands, basic typing. Frontmost-app detection (used for context-aware commands like "send to John") falls back to no-context mode — UI Automation port is the next Windows-side milestone.
+
+**Backlog:**
+- Apple notarization pipeline (post Apple Developer account approval)
+- Authenticode code-signing for Windows
+- macOS auto-update (`electron-updater`)
+- Type-and-backspace marked-text injection (live in-app transcript updates)
+- Per-user audio-recording opt-in toggle (currently always on for debugging)
+- Google OAuth verification (for public Calendar/Gmail-readonly access)
+- Path A → C of the macOS-dictation-quality UX work (see `CLAUDE.md`)
+
+---
+
+## License
+
+Private. All rights reserved by Uxie Labs.
