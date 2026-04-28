@@ -1,22 +1,51 @@
-/* MiniFlow — palette from Swift Color+Hex.swift. Clean typography + antialiasing. */
+/* Uxie — design pass 1 (cream palette, Newsreader serif, Inter Tight sans, JetBrains Mono).
+   Existing variable names are preserved so the rest of the app inherits the new look
+   without per-component edits. New tokens (cream/tan/sky/lilac/peach/mint/yellow + ink/paper)
+   are additive. The design package uses these throughout. */
 :root {
   color-scheme: light;
-  --bg-warm:         #F3F3F1;
-  --fn-card-bg:      #FFFCF0;
-  --fn-card-border:  #EDE6C3;
-  --accent-brown:    #7A5C1E;
-  --nav-active:      #E3E3E0;
-  --text:            #0B0B0C;
-  --text-muted:      #6B6B70;
+
+  /* — design palette — */
+  --paper:           #fffdf8;   /* primary surface */
+  --cream:           #faf7f0;   /* secondary surface */
+  --cream-2:         #f2ede1;
+  --ink:             #1a1613;   /* primary text */
+  --ink-2:           #3a342d;
+  --muted:           #6b6458;
+  --muted-2:         #9a9181;
+  --line:            #e8e1d0;
+  --line-2:          #d8cfb8;
+  --tan:             #e8dec6;
+  --tan-2:           #d9ca9e;
+  --yellow:          #f2e2a4;
+  --green:           #7aa369;
+  --red:             #d36652;
+  --mint:            #b8d4ba;
+  --sky:             #a8c5d9;
+  --lilac:           #c9b8d9;
+  --peach:           #f2cdb8;
+  --accent:          #d97757;   /* terracotta (was --accent-brown) */
+  --accent-2:        #f4a261;
+
+  /* — legacy aliases (kept so existing components don't break) — */
+  --bg-warm:         #efe9d8;   /* warmer page background */
+  --fn-card-bg:      var(--cream);
+  --fn-card-border:  var(--line);
+  --accent-brown:    var(--accent);
+  --nav-active:      var(--cream-2);
+  --text:            var(--ink);
+  --text-muted:      var(--muted);
   --success-green:   #2D6A4F;
   --error-red:       #9B1C1C;
-  --card-border:     #E5E5EA;
-  --card-bg:         #FFFFFF;
+  --card-border:     var(--line);
+  --card-bg:         var(--paper);
 
-  /* System font stack — SF Pro on macOS falls back to Inter / Segoe UI elsewhere */
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter",
-               "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-serif: "New York", "Georgia", "Iowan Old Style", serif;
+  /* — type stacks — */
+  --font-sans:  "Inter Tight", -apple-system, BlinkMacSystemFont, "SF Pro Text",
+                "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-serif: "Newsreader", "New York", "Georgia", "Iowan Old Style", serif;
+  --font-mono:  "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --font-hand:  "Caveat", cursive;
 
   font-family: var(--font-sans);
   font-size: 13px;
@@ -25,6 +54,28 @@
   text-rendering: optimizeLegibility;
   font-feature-settings: "ss01", "cv11";
 }
+
+/* — utility text classes used by the design — */
+.serif { font-family: var(--font-serif); font-optical-sizing: auto; letter-spacing: -0.01em; }
+.mono  { font-family: var(--font-mono); }
+.hand  { font-family: var(--font-hand); }
+
+/* keyboard hint chip — used by the dictate banner ("Hold [fn] to start") */
+.kbd {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 22px; height: 22px; padding: 0 6px; border-radius: 6px;
+  background: var(--yellow); color: var(--ink);
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+  border: 1px solid rgba(0,0,0,0.08);
+  box-shadow: 0 1px 0 rgba(0,0,0,0.1);
+}
+
+/* — animations referenced by Mascot/Waveform — namespaced uxie-* to avoid collisions — */
+@keyframes uxie-breathe { 0%,100% { transform: scale(1); }    50% { transform: scale(1.04); } }
+@keyframes uxie-blink   { 0%,92%,100% { transform: scaleY(1); } 95% { transform: scaleY(0.1); } }
+@keyframes uxie-wag     { 0%,100% { transform: rotate(-3deg); } 50% { transform: rotate(3deg); } }
+@keyframes uxie-bob     { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+@keyframes uxie-waveBar { 0%,100% { transform: scaleY(0.3); }  50% { transform: scaleY(1); } }
 
 * { box-sizing: border-box; }
 html, body, #root {
