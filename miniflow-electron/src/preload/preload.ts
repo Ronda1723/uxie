@@ -47,6 +47,10 @@ function listen<T>(channel: string, cb: (value: T) => void) {
 }
 
 const api = {
+  // Host platform — exposed so the renderer can render OS-specific labels
+  // ("fn" on Mac, "right alt" on Windows). Set once at preload time.
+  platform: process.platform as "darwin" | "win32" | "linux",
+
   // LLM
   listProviders:  () => ipcRenderer.invoke(CH.listProviders),
   getLLMStatus:   () => ipcRenderer.invoke(CH.getStatus),

@@ -315,6 +315,11 @@ function DictateBanner({ isListening, isProcessing, captureMode, interim }: {
   captureMode: "dictation" | "command";
   interim: string;
 }) {
+  // Hotkey label is OS-specific. macOS uses fn (firmware key). Windows can't
+  // intercept fn — Right-Alt is the bound key in helper-win. Falls back to
+  // "fn" if window.miniflow.platform is somehow unavailable.
+  const platform = (window.miniflow as any).platform ?? "darwin";
+  const hotkeyLabel = platform === "win32" ? "right alt" : "fn";
   return (
     <div style={{
       position: "relative", overflow: "hidden",
@@ -346,7 +351,7 @@ function DictateBanner({ isListening, isProcessing, captureMode, interim }: {
           </span>
           {!isListening && !isProcessing && (
             <>
-              <span className="kbd">fn</span>
+              <span className="kbd">{hotkeyLabel}</span>
               <span style={{ fontSize: 14, fontWeight: 600, color: "var(--ink)" }}>to start dictating</span>
             </>
           )}
