@@ -19,7 +19,7 @@ export function Sidebar({ activeTab, onTab, isListening, onSettings }: Props) {
 
       <div className="logo-row">
         <span className="wave-icon">〰</span>
-        <span className="logo-text">Miniflow</span>
+        <span className="logo-text">Uxie</span>
         <span className="pill-basic">Basic</span>
       </div>
 
