@@ -1,10 +1,9 @@
 """
-iOS-facing server-side agent endpoints. Phase 0 scaffolding — protocol surface
-is locked here so iOS can implement against it. Full LLM-tool-calling loop
-ships in Phase 0.5 (next session).
+iOS-facing server-side agent endpoints.
 
-Strictly additive: existing /llm/chat, /llm/stream, /stt/session keep working
-exactly as before. Mac and Windows desktop clients are unaffected.
+Runs the LLM tool-calling loop server-side, streams progress to the client via
+SSE. Strictly additive: existing /llm/chat, /llm/stream, /stt/session keep
+working exactly as before — Mac/Windows desktop clients are unaffected.
 
 Endpoints (registered in main.py):
   POST /agent/execute                                    → SSE stream
@@ -15,24 +14,17 @@ SSE wire format (standard):
     event: tool_call_start
     data: {"id":"tc_abc","name":"send_slack","args":{...}}
 
-Event taxonomy (frozen):
-  session              — first event, includes session_id and conversation_id
-  tool_call_start      — server-side tool dispatch begins
-  tool_call_result     — server-side tool dispatch finished
-  approval_needed      — destructive tool; client must POST /agent/approve
-  client_tool_invoke   — LLM picked a client-only tool; client must POST result
-  final_text           — user-visible final answer (free text, not a tool result)
-  error                — terminal error (with code, message, retryable bool)
-  done                 — clean stream end
+Event taxonomy (frozen, must match docs/PROTOCOL.md in uxie-ios):
+  session              first event; carries session_id and conversation_id
+  tool_call_start      LLM dispatched a tool (server- or client-side)
+  tool_call_result     a tool finished
+  approval_needed      destructive tool — client must POST /agent/approve
+  client_tool_invoke   LLM picked a client-only tool — client runs + posts back
+  final_text           user-visible final answer
+  error                terminal error (code, message, retryable)
+  done                 clean stream end
 
-Approval timeout: 60s. Client-tool timeout: 30s. Server keep-alive ping every
-15s (": ping\\n\\n" SSE comment).
-
-Known TODOs left for Phase 0.5:
-  - Wire LLM tool-calling (reuse litellm machinery from proxy.py)
-  - Persist Conversation/Turn rows as the loop progresses
-  - Connector tools (Slack, Gmail, Calendar) — copy from miniflow-engine/connectors/
-  - Multi-replica session storage (currently in-memory; needs Redis for prod scale)
+Approval timeout: 60s. Client-tool timeout: 30s. Server keep-alive ping every 15s.
 """
 
 from __future__ import annotations
@@ -43,6 +35,7 @@ import logging
 import secrets
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
 from fastapi import Depends, HTTPException, Request
@@ -51,6 +44,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import current_user
 from db import User, get_db
+from db_ios import Conversation, Turn
+from limits import check_and_increment
+import usage as _usage
+from proxy import _llm_base_and_key, get_http
 
 _log = logging.getLogger("agent")
 
@@ -60,13 +57,115 @@ _log = logging.getLogger("agent")
 APPROVAL_TIMEOUT_S = 60
 CLIENT_TOOL_TIMEOUT_S = 30
 KEEPALIVE_INTERVAL_S = 15
+MAX_TURNS = 4
 
-# Tools that always require user approval before executing.
+DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_PROVIDER = "openai"
+
+# Tools that always require user approval before executing. Server-side
+# tools (Slack/Gmail/Calendar) and client-side tools both can be marked
+# destructive — gate is the same either way.
 DESTRUCTIVE_TOOLS: set[str] = {
     "send_slack", "send_email", "send_message",
-    "create_calendar_event", "delete_calendar_event",
-    "post_tweet", "create_issue", "delete_file",
+    "create_calendar_event", "create_calendar_event_local",
+    "delete_calendar_event", "delete_file",
+    "post_tweet", "create_issue",
 }
+
+# Server-side tools the agent can invoke (Phase 0.5: minimal demo set;
+# Phase 0.6 adds connectors: Slack/Gmail/Calendar/Notion/Linear/GitHub).
+SERVER_TOOL_NAMES: set[str] = {"echo"}
+
+# Client-side tool schemas advertised to the LLM. These are the iOS-only
+# tools (open_url, share_sheet, EventKit). When advertised by the client
+# in tools_available_on_client, the LLM sees them; when picked, the server
+# emits client_tool_invoke and parks for the result POST.
+CLIENT_TOOL_SCHEMAS: dict[str, dict] = {
+    "open_url": {
+        "type": "function",
+        "function": {
+            "name": "open_url",
+            "description": (
+                "Open a URL on the user's device. Use this for app-scheme links "
+                "like notion://, slack://, tel:, mailto:, or plain https://."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+                "required": ["url"],
+            },
+        },
+    },
+    "share_sheet": {
+        "type": "function",
+        "function": {
+            "name": "share_sheet",
+            "description": "Show the iOS share sheet for the given text.",
+            "parameters": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+        },
+    },
+    "copy_to_clipboard": {
+        "type": "function",
+        "function": {
+            "name": "copy_to_clipboard",
+            "description": "Copy text to the user's clipboard.",
+            "parameters": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+        },
+    },
+    "create_calendar_event_local": {
+        "type": "function",
+        "function": {
+            "name": "create_calendar_event_local",
+            "description": "Create an event in the user's local Calendar via EventKit.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "starts_at": {"type": "string", "description": "ISO-8601 timestamp"},
+                    "ends_at": {"type": "string", "description": "ISO-8601 timestamp"},
+                    "notes": {"type": "string"},
+                },
+                "required": ["title", "starts_at", "ends_at"],
+            },
+        },
+    },
+    "add_reminder": {
+        "type": "function",
+        "function": {
+            "name": "add_reminder",
+            "description": "Add a reminder to the user's Reminders app.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "due_at": {"type": "string", "description": "ISO-8601 timestamp"},
+                },
+                "required": ["title"],
+            },
+        },
+    },
+}
+
+SYSTEM_PROMPT = """You are Uxie, a voice-controlled agent. The user spoke a command on their phone; you decide what to do.
+
+Rules:
+1. Prefer calling a tool over describing what you'd do. The user expects action, not explanation.
+2. If the user wants to send a message, create an event, or do anything destructive, call the appropriate tool — the user will approve it before it actually fires.
+3. If a tool needs information you don't have (e.g. a recipient's email address), ask one short clarifying question via final_text instead of guessing.
+4. After tools complete, return a one-sentence confirmation via final_text.
+5. Be terse. Voice output is short.
+6. If the user just wants to dictate text (no command), return their cleaned-up text via final_text.
+
+Today's date is {today}. The user is on {device}.
+"""
 
 
 # ── In-memory pending-gate state ──────────────────────────────────────────────
@@ -74,8 +173,7 @@ DESTRUCTIVE_TOOLS: set[str] = {
 # /agent/approve and /agent/client_tool_result look up the gate, store the
 # client's response payload, and set the event to wake the loop.
 #
-# This is intentionally process-local for Phase 0. When we scale to multiple
-# Railway replicas, swap _PENDING for a Redis pub/sub backplane keyed identically.
+# Process-local for Phase 0. Multi-replica deployment: swap for Redis pub/sub.
 
 @dataclass
 class _PendingGate:
@@ -114,11 +212,62 @@ async def _wake(gate_id: str, payload: dict[str, Any]) -> bool:
 # ── SSE formatting ────────────────────────────────────────────────────────────
 
 def _sse(event: str, data: dict[str, Any]) -> bytes:
-    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n".encode("utf-8")
+    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'), default=str)}\n\n".encode("utf-8")
 
 
 def _sse_ping() -> bytes:
     return b": ping\n\n"
+
+
+# ── LLM call (extracted so tests can monkey-patch) ────────────────────────────
+
+async def _call_llm(messages: list[dict], tools: list[dict], model: str, provider: str) -> tuple[dict, int, dict]:
+    """Single non-streaming chat-completions call. Returns (response_json, duration_ms, usage_dict).
+    Tests monkey-patch this with a deterministic stub."""
+    base, key = _llm_base_and_key(provider)
+    payload: dict[str, Any] = {"model": model, "messages": messages, "temperature": 0.2}
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+
+    client = get_http()
+    t0 = time.perf_counter()
+    resp = await client.post(
+        f"{base}/chat/completions",
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        json=payload,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    dt_ms = int((time.perf_counter() - t0) * 1000)
+    return data, dt_ms, (data.get("usage") or {})
+
+
+# ── Server-side tool dispatcher ───────────────────────────────────────────────
+# Phase 0.5: minimal (just `echo` for end-to-end verification).
+# Phase 0.6: connectors (Slack/Gmail/Calendar/Notion/Linear/GitHub) plug in here.
+
+async def _server_tool_execute(name: str, args: dict, user: User) -> Any:
+    if name == "echo":
+        return {"echoed": args.get("text", "")}
+    raise ValueError(f"unknown server tool: {name}")
+
+
+# ── Tool schema assembly ──────────────────────────────────────────────────────
+
+def _build_tool_schemas(client_tools: list[str]) -> list[dict]:
+    """Combine server-side tool schemas with the client-side ones the caller
+    advertised. The LLM sees one merged tool list."""
+    schemas: list[dict] = []
+    # Server-side tools (Phase 0.5: just echo, hidden from the LLM in normal use).
+    # Phase 0.6 will append connector tools here per user's connected providers.
+
+    # Client-side tools the caller advertised
+    for name in client_tools:
+        schema = CLIENT_TOOL_SCHEMAS.get(name)
+        if schema:
+            schemas.append(schema)
+    return schemas
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -134,7 +283,7 @@ async def execute(
         transcript: str                       — user's spoken text
         conversation_id: str | null           — null → start a new thread
         tools_available_on_client: [str]      — names of tools the client can run
-        mode: "command" | "dictation"         — command runs the loop, dictation just echoes corrected text
+        mode: "command" | "dictation"         — "command" runs the loop; "dictation" returns corrected text only
     """
     body = await request.json()
     transcript: str = (body.get("transcript") or "").strip()
@@ -147,6 +296,9 @@ async def execute(
     if mode not in ("command", "dictation"):
         raise HTTPException(400, "mode must be 'command' or 'dictation'")
 
+    # Per-user rate / tier check (reuses existing /llm/chat machinery).
+    await check_and_increment(db, user, "command" if mode == "command" else "dictation")
+
     session_id = _ulid()
     _log.info(
         "agent.execute user=%s session=%s mode=%s conv=%s client_tools=%d transcript_len=%d",
@@ -154,7 +306,7 @@ async def execute(
     )
 
     return StreamingResponse(
-        _run_loop(session_id, conversation_id, transcript, mode, client_tools, user.id),
+        _run_loop(session_id, conversation_id, transcript, mode, client_tools, user, db),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -198,8 +350,6 @@ async def client_tool_result(
 
 
 # ── Loop body ─────────────────────────────────────────────────────────────────
-# Phase 0: emits a deterministic stub stream so iOS can wire up its SSE consumer
-# end-to-end. Phase 0.5 replaces _phase0_stub_stream with the real LLM loop.
 
 async def _run_loop(
     session_id: str,
@@ -207,13 +357,25 @@ async def _run_loop(
     transcript: str,
     mode: str,
     client_tools: list[str],
-    user_id: int,
+    user: User,
+    db: AsyncSession,
 ) -> AsyncIterator[bytes]:
     try:
         yield _sse("session", {"session_id": session_id, "conversation_id": conversation_id})
 
-        async for chunk in _phase0_stub_stream(session_id, conversation_id, transcript, mode, client_tools):
-            yield chunk
+        # Persist user turn before doing any work — even if the loop fails,
+        # we have a record of what was asked.
+        await _ensure_conversation(db, conversation_id, user.id, transcript)
+        await _append_turn(db, conversation_id, "user", transcript)
+
+        if mode == "dictation":
+            # Dictation mode: cleaner / grammar fix only, no tool calls.
+            text = await _dictation_fix(transcript, user)
+            await _append_turn(db, conversation_id, "assistant", text)
+            yield _sse("final_text", {"text": text})
+        else:
+            async for chunk in _command_loop(session_id, conversation_id, transcript, client_tools, user, db):
+                yield chunk
 
         yield _sse("done", {"conversation_id": conversation_id})
 
@@ -225,45 +387,222 @@ async def _run_loop(
         yield _sse("error", {"code": "internal", "message": str(e), "retryable": False})
 
 
-async def _phase0_stub_stream(
-    session_id: str, conversation_id: str, transcript: str, mode: str, client_tools: list[str],
+async def _command_loop(
+    session_id: str,
+    conversation_id: str,
+    transcript: str,
+    client_tools: list[str],
+    user: User,
+    db: AsyncSession,
 ) -> AsyncIterator[bytes]:
-    """Deterministic event sequence for iOS to verify SSE plumbing. Replace in Phase 0.5."""
-    # Demonstrates the full event taxonomy iOS needs to handle.
-    yield _sse("tool_call_start", {"id": "tc_phase0", "name": "echo", "args": {"transcript": transcript}})
-    await asyncio.sleep(0.05)
-    yield _sse("tool_call_result", {"id": "tc_phase0", "ok": True, "result": "(phase 0 stub)"})
+    """The real LLM tool-calling loop. Runs up to MAX_TURNS turns."""
+    today = datetime.now(timezone.utc).strftime("%A %Y-%m-%d")
+    messages: list[dict] = [
+        {"role": "system", "content": SYSTEM_PROMPT.format(today=today, device="iPhone")},
+        {"role": "user", "content": transcript},
+    ]
+    tools = _build_tool_schemas(client_tools)
 
-    if mode == "command" and "open_url" in client_tools:
-        # Demonstrate the client-tool roundtrip so iOS can implement against it.
-        tcid = "tc_phase0_client"
-        yield _sse("client_tool_invoke", {
-            "session_id": session_id,
-            "id": tcid,
-            "name": "open_url",
-            "args": {"url": "https://uxie.ai/"},
-        })
+    for turn_num in range(MAX_TURNS):
+        # ── 1. Call the LLM ──
         try:
-            result = await _park(f"client_tool:{session_id}:{tcid}", CLIENT_TOOL_TIMEOUT_S)
-            yield _sse("tool_call_result", {"id": tcid, "ok": result.get("error") is None, "result": result})
-        except asyncio.TimeoutError:
-            yield _sse("error", {"code": "client_tool_timeout", "message": f"no result after {CLIENT_TOOL_TIMEOUT_S}s", "retryable": True})
+            data, dt_ms, llm_usage = await _call_llm(messages, tools, DEFAULT_MODEL, DEFAULT_PROVIDER)
+        except Exception as e:  # noqa: BLE001
+            yield _sse("error", {"code": "llm_call_failed", "message": str(e), "retryable": True})
             return
 
-    yield _sse("final_text", {
-        "text": (
-            f"You said: {transcript}\n\n"
-            "(Phase 0 stub — full LLM loop ships in Phase 0.5. "
-            "iOS can verify SSE consumption + client-tool roundtrip + history persistence "
-            "against this stub.)"
-        ),
-    })
+        # Best-effort usage tracking; never blocks the loop.
+        try:
+            await _usage.record_llm_usage(
+                db,
+                user_id=user.id,
+                provider=DEFAULT_PROVIDER,
+                model=DEFAULT_MODEL,
+                action="command",
+                prompt_tokens=int(llm_usage.get("prompt_tokens", 0) or 0),
+                completion_tokens=int(llm_usage.get("completion_tokens", 0) or 0),
+                duration_ms=dt_ms,
+            )
+        except Exception:
+            _log.warning("record_llm_usage failed", exc_info=True)
+
+        choice = (data.get("choices") or [{}])[0].get("message") or {}
+        tool_calls = choice.get("tool_calls") or []
+        content = choice.get("content")
+
+        # ── 2. No tool calls → final answer ──
+        if not tool_calls:
+            text = content or "(no response)"
+            await _append_turn(db, conversation_id, "assistant", text)
+            yield _sse("final_text", {"text": text})
+            return
+
+        # ── 3. Has tool calls — record assistant turn, dispatch each call ──
+        messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
+        await _append_turn(db, conversation_id, "assistant", content or "", tool_calls_json=tool_calls)
+
+        for tc in tool_calls:
+            tc_id = tc.get("id") or _ulid()
+            fn = tc.get("function") or {}
+            tc_name = fn.get("name") or ""
+            try:
+                tc_args = json.loads(fn.get("arguments") or "{}")
+            except Exception:
+                tc_args = {}
+
+            yield _sse("tool_call_start", {"id": tc_id, "name": tc_name, "args": tc_args})
+
+            tool_result_for_llm: str
+            ok: bool
+            yielded_result_event = False
+
+            if tc_name in DESTRUCTIVE_TOOLS:
+                # Approval gate — common to client- and server-side destructive tools.
+                yield _sse("approval_needed", {
+                    "session_id": session_id,
+                    "tool": tc_name,
+                    "summary": _summarize_tool(tc_name, tc_args),
+                })
+                try:
+                    decision = await _park(f"approve:{session_id}", APPROVAL_TIMEOUT_S)
+                except asyncio.TimeoutError:
+                    yield _sse("error", {"code": "approval_timeout", "message": f"no approval after {APPROVAL_TIMEOUT_S}s", "retryable": False})
+                    return
+                if not decision.get("approved"):
+                    tool_result_for_llm = "User cancelled the action."
+                    ok = False
+                    yield _sse("tool_call_result", {"id": tc_id, "ok": False, "result": "User cancelled."})
+                    yielded_result_event = True
+                else:
+                    # Approved — fall through to actual execution below
+                    pass
+
+            if not yielded_result_event:
+                if tc_name in client_tools:
+                    # Client-side dispatch: emit invoke, park for result POST
+                    yield _sse("client_tool_invoke", {
+                        "session_id": session_id,
+                        "id": tc_id,
+                        "name": tc_name,
+                        "args": tc_args,
+                    })
+                    try:
+                        payload = await _park(f"client_tool:{session_id}:{tc_id}", CLIENT_TOOL_TIMEOUT_S)
+                    except asyncio.TimeoutError:
+                        yield _sse("error", {"code": "client_tool_timeout", "message": f"no result after {CLIENT_TOOL_TIMEOUT_S}s", "retryable": True})
+                        return
+                    err = payload.get("error")
+                    ok = err is None
+                    tool_result_for_llm = json.dumps({"result": payload.get("result"), "error": err}, default=str)
+                    yield _sse("tool_call_result", {"id": tc_id, "ok": ok, "result": payload.get("result")})
+                elif tc_name in SERVER_TOOL_NAMES:
+                    # Server-side dispatch: execute now
+                    try:
+                        result = await _server_tool_execute(tc_name, tc_args, user)
+                        ok = True
+                        tool_result_for_llm = json.dumps(result, default=str)
+                        yield _sse("tool_call_result", {"id": tc_id, "ok": True, "result": result})
+                    except Exception as e:  # noqa: BLE001
+                        ok = False
+                        tool_result_for_llm = f"error: {e}"
+                        yield _sse("tool_call_result", {"id": tc_id, "ok": False, "result": str(e)})
+                else:
+                    ok = False
+                    tool_result_for_llm = f"Unknown tool: {tc_name}"
+                    yield _sse("tool_call_result", {"id": tc_id, "ok": False, "result": tool_result_for_llm})
+
+            # Append tool result to messages so the LLM sees it on the next turn
+            messages.append({"role": "tool", "tool_call_id": tc_id, "content": tool_result_for_llm})
+            await _append_turn(db, conversation_id, "tool", tool_result_for_llm, tool_call_id=tc_id)
+
+    # Reached MAX_TURNS without a final answer
+    text = "I tried but couldn't finish that — try rephrasing or breaking it into steps."
+    await _append_turn(db, conversation_id, "assistant", text)
+    yield _sse("final_text", {"text": text})
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+async def _dictation_fix(transcript: str, user: User) -> str:
+    """Light grammar / punctuation fix. Single non-tool LLM call."""
+    messages = [
+        {"role": "system", "content": (
+            "You are a dictation cleaner. Take the user's raw speech-to-text "
+            "output and return ONLY the cleaned text — fix punctuation, casing, "
+            "and obvious disfluencies. Do not paraphrase. Do not add commentary."
+        )},
+        {"role": "user", "content": transcript},
+    ]
+    try:
+        data, _dt, _u = await _call_llm(messages, [], DEFAULT_MODEL, DEFAULT_PROVIDER)
+        choice = (data.get("choices") or [{}])[0].get("message") or {}
+        return choice.get("content") or transcript
+    except Exception:
+        _log.exception("dictation fix failed; returning raw transcript")
+        return transcript
+
+
+# ── Persistence helpers ──────────────────────────────────────────────────────
+
+async def _ensure_conversation(db: AsyncSession, conversation_id: str, user_id: int, first_text: str) -> None:
+    """Create the Conversation row if missing; otherwise bump last_active_at.
+    If the conversation exists but belongs to a different user, raise 404 (no leak)."""
+    existing = await db.get(Conversation, conversation_id)
+    if existing:
+        if existing.user_id != user_id:
+            raise HTTPException(404, "conversation not found")
+        existing.last_active_at = datetime.now(timezone.utc)
+    else:
+        title = (first_text or "")[:60]
+        conv = Conversation(
+            id=conversation_id,
+            user_id=user_id,
+            title=title,
+            created_at=datetime.now(timezone.utc),
+            last_active_at=datetime.now(timezone.utc),
+        )
+        db.add(conv)
+    await db.commit()
+
+
+async def _append_turn(
+    db: AsyncSession,
+    conversation_id: str,
+    role: str,
+    text: str,
+    *,
+    tool_calls_json: Any | None = None,
+    tool_call_id: str | None = None,
+) -> None:
+    turn = Turn(
+        id=_ulid(),
+        conversation_id=conversation_id,
+        role=role,
+        text=text,
+        tool_calls_json=tool_calls_json,
+        tool_call_id=tool_call_id,
+    )
+    db.add(turn)
+    await db.commit()
+
+
+# ── Tool-summary helper (for approval sheet text) ─────────────────────────────
+
+def _summarize_tool(name: str, args: dict) -> str:
+    if name == "send_slack":
+        return f"Send Slack to {args.get('to', '?')}: \"{args.get('text', '')}\""
+    if name == "send_email":
+        subj = args.get("subject", "")
+        return f"Email {args.get('to', '?')}" + (f" — \"{subj}\"" if subj else "")
+    if name in ("create_calendar_event", "create_calendar_event_local"):
+        return f"Create event \"{args.get('title', '')}\" at {args.get('starts_at', '?')}"
+    if name == "delete_file":
+        return f"Delete {args.get('path', '?')}"
+    return f"{name}({json.dumps(args, default=str)})"
+
+
+# ── ULID-ish ─────────────────────────────────────────────────────────────────
 
 def _ulid() -> str:
-    """ULID-ish: ms timestamp + 64 random bits, lexicographically sortable."""
+    """Timestamp + 64 random bits, lexicographically sortable."""
     ts = int(time.time() * 1000).to_bytes(6, "big").hex()
     rnd = secrets.token_hex(8)
     return f"{ts}{rnd}"
