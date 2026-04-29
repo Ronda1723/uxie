@@ -49,6 +49,11 @@ from limits import check_and_increment
 import usage as _usage
 from proxy import _llm_base_and_key, get_http
 
+try:
+    import connectors as _connectors
+except Exception:  # noqa: BLE001 — connectors package optional for early phases
+    _connectors = None  # type: ignore[assignment]
+
 _log = logging.getLogger("agent")
 
 
@@ -63,13 +68,19 @@ DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_PROVIDER = "openai"
 
 # Tools that always require user approval before executing. Server-side
-# tools (Slack/Gmail/Calendar) and client-side tools both can be marked
-# destructive — gate is the same either way.
+# (connector) tools and client-side tools both can be marked destructive —
+# the gate is the same either way. Names match the schema definitions.
 DESTRUCTIVE_TOOLS: set[str] = {
+    # Generic / legacy (kept so existing tests don't break)
     "send_slack", "send_email", "send_message",
-    "create_calendar_event", "create_calendar_event_local",
-    "delete_calendar_event", "delete_file",
-    "post_tweet", "create_issue",
+    # Slack connector
+    "slack_send_message",
+    # Calendar
+    "create_calendar_event", "create_calendar_event_local", "delete_calendar_event",
+    # Files / generic destructive
+    "delete_file",
+    # Future connectors (placeholder — names will be confirmed when ported)
+    "gmail_send", "github_create_issue", "linear_create_issue", "notion_append",
 }
 
 # Server-side tools the agent can invoke (Phase 0.5: minimal demo set;
@@ -244,24 +255,45 @@ async def _call_llm(messages: list[dict], tools: list[dict], model: str, provide
 
 
 # ── Server-side tool dispatcher ───────────────────────────────────────────────
-# Phase 0.5: minimal (just `echo` for end-to-end verification).
-# Phase 0.6: connectors (Slack/Gmail/Calendar/Notion/Linear/GitHub) plug in here.
+# Phase 0.6: connector tools (Slack today; Google/GitHub/Notion/Linear later)
+# dispatch via the connectors registry, which handles OAuth-token lookup.
+# `echo` is kept as a no-OAuth demo tool used by tests.
 
-async def _server_tool_execute(name: str, args: dict, user: User) -> Any:
+async def _server_tool_execute(
+    name: str, args: dict, user: User, db: AsyncSession
+) -> Any:
     if name == "echo":
         return {"echoed": args.get("text", "")}
+    if _connectors is not None and name in _connectors.all_tool_names():
+        ok, result = await _connectors.execute(db, user.id, name, args)
+        if not ok:
+            raise RuntimeError(str(result))
+        return result
     raise ValueError(f"unknown server tool: {name}")
+
+
+def _is_server_tool(name: str) -> bool:
+    if name in SERVER_TOOL_NAMES:
+        return True
+    if _connectors is not None and name in _connectors.all_tool_names():
+        return True
+    return False
 
 
 # ── Tool schema assembly ──────────────────────────────────────────────────────
 
-def _build_tool_schemas(client_tools: list[str]) -> list[dict]:
-    """Combine server-side tool schemas with the client-side ones the caller
-    advertised. The LLM sees one merged tool list."""
+async def _build_tool_schemas(
+    client_tools: list[str], db: AsyncSession, user: User
+) -> list[dict]:
+    """Combine server-side tool schemas (per user's connected providers) with
+    the client-side ones the caller advertised. The LLM sees one merged list."""
     schemas: list[dict] = []
-    # Server-side tools (Phase 0.5: just echo, hidden from the LLM in normal use).
-    # Phase 0.6 will append connector tools here per user's connected providers.
-
+    # Server-side tools — only providers the user has connected get advertised.
+    if _connectors is not None:
+        try:
+            schemas.extend(await _connectors.tool_schemas_for_user(db, user.id))
+        except Exception:
+            _log.warning("connector schema lookup failed", exc_info=True)
     # Client-side tools the caller advertised
     for name in client_tools:
         schema = CLIENT_TOOL_SCHEMAS.get(name)
@@ -401,7 +433,7 @@ async def _command_loop(
         {"role": "system", "content": SYSTEM_PROMPT.format(today=today, device="iPhone")},
         {"role": "user", "content": transcript},
     ]
-    tools = _build_tool_schemas(client_tools)
+    tools = await _build_tool_schemas(client_tools, db, user)
 
     for turn_num in range(MAX_TURNS):
         # ── 1. Call the LLM ──
@@ -495,10 +527,10 @@ async def _command_loop(
                     ok = err is None
                     tool_result_for_llm = json.dumps({"result": payload.get("result"), "error": err}, default=str)
                     yield _sse("tool_call_result", {"id": tc_id, "ok": ok, "result": payload.get("result")})
-                elif tc_name in SERVER_TOOL_NAMES:
-                    # Server-side dispatch: execute now
+                elif _is_server_tool(tc_name):
+                    # Server-side dispatch (echo or connector): execute now
                     try:
-                        result = await _server_tool_execute(tc_name, tc_args, user)
+                        result = await _server_tool_execute(tc_name, tc_args, user, db)
                         ok = True
                         tool_result_for_llm = json.dumps(result, default=str)
                         yield _sse("tool_call_result", {"id": tc_id, "ok": True, "result": result})
@@ -587,9 +619,10 @@ async def _append_turn(
 # ── Tool-summary helper (for approval sheet text) ─────────────────────────────
 
 def _summarize_tool(name: str, args: dict) -> str:
-    if name == "send_slack":
-        return f"Send Slack to {args.get('to', '?')}: \"{args.get('text', '')}\""
-    if name == "send_email":
+    if name in ("send_slack", "slack_send_message"):
+        target = args.get("channel") or args.get("to") or "?"
+        return f"Send Slack to {target}: \"{args.get('text', '')}\""
+    if name in ("send_email", "gmail_send"):
         subj = args.get("subject", "")
         return f"Email {args.get('to', '?')}" + (f" — \"{subj}\"" if subj else "")
     if name in ("create_calendar_event", "create_calendar_event_local"):

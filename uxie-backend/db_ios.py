@@ -16,7 +16,7 @@ Tables:
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, ForeignKey, Integer, JSON, String, Text,
+    Boolean, Column, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 
@@ -77,3 +77,23 @@ class RefreshToken(Base):
     revoked = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
     last_used_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class OAuthToken(Base):
+    """Server-side OAuth tokens for connectors (Slack, Google, GitHub, ...).
+    One row per (user_id, provider). The OAuth callback flow (TODO) writes
+    the row; the agent loop reads it before calling a connector."""
+    __tablename__ = "oauth_tokens"
+    __table_args__ = (UniqueConstraint("user_id", "provider", name="uq_oauth_user_provider"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider = Column(String, nullable=False)             # "slack" | "google" | "github" | ...
+    access_token = Column(Text, nullable=False)
+    refresh_token = Column(Text, nullable=True)
+    token_type = Column(String, nullable=True, default="Bearer")
+    scope = Column(Text, nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    extra_json = Column(JSON, nullable=True)              # provider-specific bits (e.g. Slack's authed_user, team_id)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_now)

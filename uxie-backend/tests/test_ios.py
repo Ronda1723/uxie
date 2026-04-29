@@ -402,3 +402,178 @@ async def test_verify_otp_response_shape_unchanged(client):
     token = await create_user_and_token(client, "ios-regression@test.com")
     assert isinstance(token, str)
     assert len(token) > 20
+
+
+# ── Connector dispatch (Phase 0.6) ───────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_slack_connector_advertised_only_when_connected(client, mock_llm, db_session):
+    """When the user has NO OAuthToken row for slack, slack_* tools must NOT
+    appear in the tools array passed to the LLM."""
+    import agent as agent_mod
+    from sqlalchemy import select
+    from db import User as UserModel
+
+    captured_tools: list[list] = []
+
+    async def capture(messages, tools, model, provider):
+        captured_tools.append([t["function"]["name"] for t in tools])
+        return _llm_response(content="done"), 5, {}
+
+    # Replace the previously-installed mock with our capturing one
+    monkeypatch_local = pytest.MonkeyPatch()
+    monkeypatch_local.setattr(agent_mod, "_call_llm", capture)
+    try:
+        token = await create_user_and_token(client, "ios-no-slack@test.com")
+        resp = await client.post(
+            "/agent/execute",
+            json={"transcript": "hi", "mode": "command"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+        assert captured_tools, "LLM should have been called once"
+        assert not any(name.startswith("slack_") for name in captured_tools[0]), \
+            f"unexpected Slack tools advertised: {captured_tools[0]}"
+    finally:
+        monkeypatch_local.undo()
+
+
+@pytest.mark.asyncio
+async def test_slack_connector_advertised_when_connected(client, mock_llm, db_session):
+    """User has an OAuthToken row for slack → Slack tools should be advertised."""
+    import agent as agent_mod
+    from sqlalchemy import select
+    from db import User as UserModel
+    from db_ios import OAuthToken
+    from datetime import datetime, timezone
+
+    captured_tools: list[list] = []
+
+    async def capture(messages, tools, model, provider):
+        captured_tools.append([t["function"]["name"] for t in tools])
+        return _llm_response(content="done"), 5, {}
+
+    monkeypatch_local = pytest.MonkeyPatch()
+    monkeypatch_local.setattr(agent_mod, "_call_llm", capture)
+    try:
+        token = await create_user_and_token(client, "ios-slack-yes@test.com")
+        user = (
+            await db_session.execute(
+                select(UserModel).where(UserModel.email == "ios-slack-yes@test.com")
+            )
+        ).scalar_one()
+        db_session.add(OAuthToken(
+            user_id=user.id,
+            provider="slack",
+            access_token="xoxb-test-token",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        ))
+        await db_session.commit()
+
+        resp = await client.post(
+            "/agent/execute",
+            json={"transcript": "send slack to john saying hi", "mode": "command"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+        assert captured_tools, "LLM should have been called once"
+        assert any(name.startswith("slack_") for name in captured_tools[0]), \
+            f"expected Slack tools to be advertised; got {captured_tools[0]}"
+    finally:
+        monkeypatch_local.undo()
+
+
+@pytest.mark.asyncio
+async def test_slack_connector_dispatch_with_mocked_http(client, mock_llm, db_session, monkeypatch):
+    """Full path: LLM picks slack_send_message → approval → dispatch via connector
+    registry → Slack API mocked at the httpx level → tool_call_result emitted."""
+    import agent as agent_mod
+    from sqlalchemy import select
+    from db import User as UserModel
+    from db_ios import OAuthToken
+    from datetime import datetime, timezone
+
+    # Two LLM responses: tool call, then final summary
+    mock_llm.append(_llm_response(tool_calls=[{
+        "id": "tc_slack_1",
+        "type": "function",
+        "function": {
+            "name": "slack_send_message",
+            "arguments": json.dumps({"channel": "Cabc123def", "text": "I'll be 10 min late"}),
+        },
+    }]))
+    mock_llm.append(_llm_response(content="Sent."))
+
+    # Mock Slack at the httpx level
+    class _FakeResp:
+        def __init__(self, payload): self._p = payload
+        def json(self): return self._p
+        def raise_for_status(self): pass
+
+    async def fake_post(url, headers=None, json=None, **_):
+        assert "slack.com/api/chat.postMessage" in url
+        assert json["channel"] == "Cabc123def"
+        return _FakeResp({"ok": True, "ts": "1234.5"})
+
+    async def fake_get(*a, **kw):
+        return _FakeResp({"ok": True, "channels": []})
+
+    # Patch the shared httpx client returned by proxy.get_http
+    from unittest.mock import MagicMock
+    fake_http = MagicMock()
+    fake_http.post = fake_post
+    fake_http.get = fake_get
+    import proxy
+    monkeypatch.setattr(proxy, "get_http", lambda: fake_http)
+
+    token = await create_user_and_token(client, "ios-slack-disp@test.com")
+    user = (
+        await db_session.execute(
+            select(UserModel).where(UserModel.email == "ios-slack-disp@test.com")
+        )
+    ).scalar_one()
+    db_session.add(OAuthToken(
+        user_id=user.id,
+        provider="slack",
+        access_token="xoxb-test",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    ))
+    await db_session.commit()
+
+    # Auto-approve when approval_needed fires
+    async def auto_approve(session_id: str):
+        await asyncio.sleep(0.05)
+        await client.post(
+            f"/agent/approve/{session_id}",
+            json={"approved": True},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    body_chunks: list[str] = []
+    resolver: asyncio.Task | None = None
+
+    async with client.stream(
+        "POST", "/agent/execute",
+        json={"transcript": "tell john slack i'll be late", "mode": "command"},
+        headers={"Authorization": f"Bearer {token}"},
+    ) as resp:
+        async for chunk in resp.aiter_text():
+            body_chunks.append(chunk)
+            if resolver is None and "approval_needed" in "".join(body_chunks):
+                events = _parse_sse("".join(body_chunks))
+                ev = next(d for n, d in events if n == "approval_needed")
+                resolver = asyncio.create_task(auto_approve(ev["session_id"]))
+        if resolver:
+            await resolver
+
+    events = _parse_sse("".join(body_chunks))
+    names = [e[0] for e in events]
+    assert "approval_needed" in names
+    assert "tool_call_result" in names
+    # The tool_call_result for the slack send should be ok=true
+    slack_results = [d for n, d in events if n == "tool_call_result" and d.get("id") == "tc_slack_1"]
+    assert slack_results, f"expected tool_call_result for tc_slack_1; got events {names}"
+    assert slack_results[0]["ok"] is True
+    assert "final_text" in names
