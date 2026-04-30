@@ -161,3 +161,33 @@ async def health(db: AsyncSession = Depends(get_db)):
 
     status_code = 200 if db_ok else 503
     return fastapi.responses.JSONResponse(content=payload, status_code=status_code)
+
+
+# ── iOS additions (Phase 0) ──────────────────────────────────────────────────
+# Strictly additive: new endpoints + new tables. Mac/Windows clients ignore
+# everything in this block; their existing flow is unchanged. Importing
+# `db_ios` registers the new SQLAlchemy models on `Base.metadata` BEFORE
+# init_db() runs (lifespan), so create_all picks them up on next deploy.
+
+import db_ios  # noqa: F401, E402 — import-for-side-effect (registers models)
+import agent as _ios_agent  # noqa: E402
+import history as _ios_history  # noqa: E402
+import auth_refresh as _ios_auth_refresh  # noqa: E402
+
+# /agent/* — server-side tool-calling loop with SSE streaming
+app.add_api_route("/agent/execute", _ios_agent.execute, methods=["POST"])
+app.add_api_route("/agent/approve/{session_id}", _ios_agent.approve, methods=["POST"])
+app.add_api_route(
+    "/agent/client_tool_result/{session_id}/{tool_call_id}",
+    _ios_agent.client_tool_result,
+    methods=["POST"],
+)
+
+# /history/* — cross-device conversation persistence
+app.add_api_route("/history", _ios_history.list_conversations, methods=["GET"])
+app.add_api_route("/history/{conversation_id}", _ios_history.conversation_detail, methods=["GET"])
+app.add_api_route("/history/{conversation_id}", _ios_history.delete_conversation, methods=["DELETE"])
+
+# /auth/refresh — refresh-token rotation (iOS only; existing /auth/verify-otp unchanged)
+app.add_api_route("/auth/issue-refresh", _ios_auth_refresh.issue_refresh, methods=["POST"])
+app.add_api_route("/auth/refresh", _ios_auth_refresh.refresh, methods=["POST"])
