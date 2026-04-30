@@ -85,7 +85,12 @@ async def refresh(request: Request, db: AsyncSession = Depends(get_db)):
     rt = (await db.execute(stmt)).scalar_one_or_none()
     if not rt:
         raise HTTPException(401, "invalid refresh token")
-    if rt.expires_at < datetime.now(timezone.utc):
+    # SQLite drops tzinfo on read even when the column is DateTime(timezone=True).
+    # Postgres preserves it. Normalize to UTC so the comparison is portable.
+    expires = rt.expires_at
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if expires < datetime.now(timezone.utc):
         raise HTTPException(401, "refresh token expired")
 
     user = await db.get(User, rt.user_id)
