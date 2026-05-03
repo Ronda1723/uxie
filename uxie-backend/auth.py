@@ -177,3 +177,17 @@ async def current_user(
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+
+async def current_user_from_token(token: str, db: AsyncSession) -> User | None:
+    """Used by flows that can't pass an Authorization header — notably the
+    OAuth `start` endpoint, which is opened in an in-app browser and gets
+    the JWT via a query param. Returns None on any decode/lookup failure
+    rather than raising — callers want to redirect cleanly, not 401."""
+    try:
+        payload = _decode_jwt(token)
+        user_id = int(payload["sub"])
+    except Exception:
+        return None
+    result = await db.execute(select(User).where(User.id == user_id))
+    return result.scalar_one_or_none()

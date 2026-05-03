@@ -22,11 +22,13 @@ from db_ios import OAuthToken
 from proxy import get_http
 
 from . import slack as _slack
+from . import google as _google
 
 # Registry: provider name → module
 _PROVIDERS = {
     _slack.PROVIDER: _slack,
-    # Phase 0.7+: google, github, notion, linear, jira, discord, spotify
+    _google.PROVIDER: _google,
+    # Phase 0.7+: github, notion, linear, jira, discord, spotify
 }
 
 # Reverse: tool name → provider name (built lazily on import)
@@ -73,4 +75,11 @@ async def execute(
     token = await get_token(db, user_id, provider)
     if token is None:
         return False, f"user has not connected {provider}"
-    return await mod.execute(name, args, token, get_http())
+    # Pass db to connectors that need to persist refreshed tokens (Google).
+    # Slack accepts the kwarg but ignores it.
+    try:
+        return await mod.execute(name, args, token, get_http(), db=db)
+    except TypeError:
+        # Older signature — fall back to the no-db form so Slack and any
+        # legacy connector keep working without changes.
+        return await mod.execute(name, args, token, get_http())

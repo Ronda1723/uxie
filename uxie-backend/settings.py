@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     openai_api_key: str = ""
     deepgram_api_key: str = ""
+
+    # OAuth client credentials per provider. Set via Railway env.
+    google_client_id: str = ""
+    google_client_secret: str = ""
     deepgram_project_id: str = ""   # if set, /stt/session mints per-session scoped keys
     deepgram_session_ttl_seconds: int = 300
 

@@ -191,3 +191,48 @@ app.add_api_route("/history/{conversation_id}", _ios_history.delete_conversation
 # /auth/refresh — refresh-token rotation (iOS only; existing /auth/verify-otp unchanged)
 app.add_api_route("/auth/issue-refresh", _ios_auth_refresh.issue_refresh, methods=["POST"])
 app.add_api_route("/auth/refresh", _ios_auth_refresh.refresh, methods=["POST"])
+
+# /oauth/google/* — connector OAuth for Gmail (and later Calendar / Drive)
+import oauth_google as _oauth_google  # noqa: E402
+app.add_api_route("/oauth/google/start", _oauth_google.start, methods=["GET"])
+app.add_api_route(
+    "/oauth/google/callback",
+    _oauth_google.callback,
+    methods=["GET"],
+    name="oauth_google_callback",
+)
+
+# /user/connections — list providers the user has connected (used by iOS Connectors UI)
+import connectors as _connectors_pkg  # noqa: E402
+from auth import current_user as _current_user  # noqa: E402
+from db import get_db as _get_db  # noqa: E402
+from sqlalchemy import select as _select  # noqa: E402
+from db_ios import OAuthToken as _OAuthToken  # noqa: E402
+
+async def _list_connections(
+    user=Depends(_current_user),
+    db=Depends(_get_db),
+):
+    rows = (await db.execute(
+        _select(_OAuthToken.provider).where(_OAuthToken.user_id == user.id)
+    )).scalars().all()
+    return {"connected": list(rows)}
+
+async def _disconnect(
+    provider: str,
+    user=Depends(_current_user),
+    db=Depends(_get_db),
+):
+    row = (await db.execute(
+        _select(_OAuthToken).where(
+            _OAuthToken.user_id == user.id, _OAuthToken.provider == provider
+        )
+    )).scalar_one_or_none()
+    if row is None:
+        return {"ok": True, "already_disconnected": True}
+    await db.delete(row)
+    await db.commit()
+    return {"ok": True}
+
+app.add_api_route("/user/connections", _list_connections, methods=["GET"])
+app.add_api_route("/user/connections/{provider}", _disconnect, methods=["DELETE"])
