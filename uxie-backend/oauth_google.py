@@ -55,6 +55,22 @@ GOOGLE_SCOPES = [
 
 CALLBACK_PATH = "/oauth/google/callback"
 
+
+def _public_callback_url(request: Request) -> str:
+    """Build the public-facing callback URL.
+
+    Behind Railway's reverse proxy, `request.url_for(...)` returns http://
+    because the internal connection from the proxy to our process is HTTP,
+    even though the client hit Railway over HTTPS. Trust the standard
+    X-Forwarded-Proto / X-Forwarded-Host headers so the URL we hand to
+    Google matches the one in the OAuth client's authorized redirect list.
+    """
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    proto = proto.split(",")[0].strip().lower() or "https"
+    host = request.headers.get("x-forwarded-host", request.url.netloc)
+    host = host.split(",")[0].strip()
+    return f"{proto}://{host}{CALLBACK_PATH}"
+
 # ── In-flight state ──────────────────────────────────────────────────────────
 # Map random state token → { user_id, client_redirect, expires_at }.
 # Single-process / memory-only is fine for Phase 0.7 since OAuth is rare; we
@@ -104,7 +120,7 @@ async def start(
         "expires_at": time.time() + _PENDING_TTL_SECONDS,
     }
 
-    callback_url = str(request.url_for("oauth_google_callback"))
+    callback_url = _public_callback_url(request)
     params = {
         "client_id": client_id,
         "redirect_uri": callback_url,
@@ -147,7 +163,7 @@ async def callback(
     if not client_id or not client_secret:
         return _client_redirect_error(state, "Google OAuth not configured on server.")
 
-    callback_url = str(request.url_for("oauth_google_callback"))
+    callback_url = _public_callback_url(request)
 
     http = get_http()
     resp = await http.post(
