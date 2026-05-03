@@ -35,7 +35,7 @@ import logging
 import secrets
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, AsyncIterator
 
 from fastapi import Depends, HTTPException, Request
@@ -183,8 +183,11 @@ Rules:
 4. After tools complete, return a one-sentence confirmation via final_text.
 5. Be terse. Voice output is short.
 6. If the user just wants to dictate text (no command), return their cleaned-up text via final_text.
+7. TIMESTAMPS: when calling a tool that takes a date/time, emit ISO-8601 with the user's timezone offset, NOT UTC.
+   Example: user is in {timezone} and says "tomorrow at 9am" — emit "{tomorrow_example}".
+   Never emit a naked "Z" / UTC timestamp; always include the offset for {timezone}.
 
-Today's date is {today}. The user is on {device}.
+Today is {today} in the user's timezone ({timezone}). The user is on {device}.
 """
 
 
@@ -331,6 +334,7 @@ async def execute(
     conversation_id: str = body.get("conversation_id") or _ulid()
     client_tools: list[str] = list(body.get("tools_available_on_client") or [])
     mode: str = body.get("mode") or "command"
+    user_timezone: str = (body.get("timezone") or "UTC")
 
     if not transcript:
         raise HTTPException(400, "transcript required")
@@ -347,7 +351,7 @@ async def execute(
     )
 
     return StreamingResponse(
-        _run_loop(session_id, conversation_id, transcript, mode, client_tools, user, db),
+        _run_loop(session_id, conversation_id, transcript, mode, client_tools, user, db, user_timezone),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -400,6 +404,7 @@ async def _run_loop(
     client_tools: list[str],
     user: User,
     db: AsyncSession,
+    user_timezone: str,
 ) -> AsyncIterator[bytes]:
     try:
         yield _sse("session", {"session_id": session_id, "conversation_id": conversation_id})
@@ -415,7 +420,7 @@ async def _run_loop(
             await _append_turn(db, conversation_id, "assistant", text)
             yield _sse("final_text", {"text": text})
         else:
-            async for chunk in _command_loop(session_id, conversation_id, transcript, client_tools, user, db):
+            async for chunk in _command_loop(session_id, conversation_id, transcript, client_tools, user, db, user_timezone):
                 yield chunk
 
         yield _sse("done", {"conversation_id": conversation_id})
@@ -435,11 +440,30 @@ async def _command_loop(
     client_tools: list[str],
     user: User,
     db: AsyncSession,
+    user_timezone: str,
 ) -> AsyncIterator[bytes]:
     """The real LLM tool-calling loop. Runs up to MAX_TURNS turns."""
-    today = datetime.now(timezone.utc).strftime("%A %Y-%m-%d")
+    # Compute "today" and a "tomorrow at 9am" example IN THE USER'S TIMEZONE
+    # so the LLM has a concrete pattern to imitate when emitting timestamps.
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(user_timezone)
+    except Exception:
+        tz = timezone.utc
+        user_timezone = "UTC"
+    now_local = datetime.now(tz)
+    today = now_local.strftime("%A %Y-%m-%d")
+    tomorrow_9am = (now_local.replace(hour=9, minute=0, second=0, microsecond=0)
+                    + timedelta(days=1))
+    tomorrow_example = tomorrow_9am.isoformat()  # includes the offset
+
     messages: list[dict] = [
-        {"role": "system", "content": SYSTEM_PROMPT.format(today=today, device="iPhone")},
+        {"role": "system", "content": SYSTEM_PROMPT.format(
+            today=today,
+            device="iPhone",
+            timezone=user_timezone,
+            tomorrow_example=tomorrow_example,
+        )},
         {"role": "user", "content": transcript},
     ]
     tools = await _build_tool_schemas(client_tools, db, user)
