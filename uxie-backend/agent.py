@@ -230,6 +230,36 @@ async def _park(gate_id: str, timeout_s: float) -> dict[str, Any]:
             _PENDING.pop(gate_id, None)
 
 
+async def _park_with_keepalive(gate_id: str, timeout_s: float, ping_every_s: float = 15.0):
+    """Async generator: yields `_sse_ping()` byte frames every `ping_every_s`
+    seconds while parked, then yields the resolved payload dict and returns.
+    Raises asyncio.TimeoutError if the overall `timeout_s` elapses.
+
+    Why: an SSE response with no bytes flowing for ~3min gets killed by
+    intermediate proxies (Railway edge) and iOS URLSession's HTTP/2 idle
+    handling. Periodic `: ping\\n\\n` SSE comments keep the socket warm
+    without surfacing as events to the client parser."""
+    gate = _PendingGate()
+    async with _PENDING_LOCK:
+        _PENDING[gate_id] = gate
+    try:
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout_s
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            try:
+                await asyncio.wait_for(gate.event.wait(), timeout=min(ping_every_s, remaining))
+                yield gate.payload or {}
+                return
+            except asyncio.TimeoutError:
+                yield _sse_ping()
+    finally:
+        async with _PENDING_LOCK:
+            _PENDING.pop(gate_id, None)
+
+
 async def _wake(gate_id: str, payload: dict[str, Any]) -> bool:
     async with _PENDING_LOCK:
         gate = _PENDING.get(gate_id)
@@ -548,11 +578,18 @@ async def _command_loop(
                     "tool": tc_name,
                     "summary": _summarize_tool(tc_name, tc_args),
                 })
+                decision = None
                 try:
-                    decision = await _park(f"approve:{session_id}", APPROVAL_TIMEOUT_S)
+                    async for chunk in _park_with_keepalive(f"approve:{session_id}", APPROVAL_TIMEOUT_S):
+                        if isinstance(chunk, (bytes, bytearray)):
+                            yield chunk
+                        else:
+                            decision = chunk
                 except asyncio.TimeoutError:
                     yield _sse("error", {"code": "approval_timeout", "message": f"no approval after {APPROVAL_TIMEOUT_S}s", "retryable": False})
                     return
+                if decision is None:
+                    decision = {}
                 if not decision.get("approved"):
                     tool_result_for_llm = "User cancelled the action."
                     ok = False
@@ -571,11 +608,18 @@ async def _command_loop(
                         "name": tc_name,
                         "args": tc_args,
                     })
+                    payload: dict[str, Any] | None = None
                     try:
-                        payload = await _park(f"client_tool:{session_id}:{tc_id}", CLIENT_TOOL_TIMEOUT_S)
+                        async for chunk in _park_with_keepalive(f"client_tool:{session_id}:{tc_id}", CLIENT_TOOL_TIMEOUT_S):
+                            if isinstance(chunk, (bytes, bytearray)):
+                                yield chunk
+                            else:
+                                payload = chunk
                     except asyncio.TimeoutError:
                         yield _sse("error", {"code": "client_tool_timeout", "message": f"no result after {CLIENT_TOOL_TIMEOUT_S}s", "retryable": True})
                         return
+                    if payload is None:
+                        payload = {}
                     err = payload.get("error")
                     ok = err is None
                     tool_result_for_llm = json.dumps({"result": payload.get("result"), "error": err}, default=str)
