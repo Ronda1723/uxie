@@ -64,8 +64,12 @@ CLIENT_TOOL_TIMEOUT_S = 30
 KEEPALIVE_INTERVAL_S = 15
 MAX_TURNS = 4
 
-DEFAULT_MODEL = "gpt-4o-mini"
-DEFAULT_PROVIDER = "openai"
+# Groq's Llama 3.3 70B is ~6× faster than gpt-4o-mini at tool-calling
+# tasks of this size, and quality is plenty for an agent that picks one
+# tool from a small registry. Falls back to OpenAI implicitly via
+# proxy._llm_base_and_key if GROQ_API_KEY isn't set.
+DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_PROVIDER = "groq"
 
 # Tools that always require user approval before executing. Server-side
 # (connector) tools and client-side tools both can be marked destructive —
