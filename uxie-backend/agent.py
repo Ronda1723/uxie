@@ -59,7 +59,11 @@ _log = logging.getLogger("agent")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-APPROVAL_TIMEOUT_S = 60
+APPROVAL_TIMEOUT_S = 300        # 5 min — was 60s, but reading "send email
+                                # to X saying Y" + tapping Do It easily takes
+                                # >60s. Production logs showed users hitting
+                                # 404 on /agent/approve because the park had
+                                # already timed out.
 CLIENT_TOOL_TIMEOUT_S = 30
 KEEPALIVE_INTERVAL_S = 15
 MAX_TURNS = 4
