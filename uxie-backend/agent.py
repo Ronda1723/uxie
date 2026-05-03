@@ -480,6 +480,18 @@ async def _command_loop(
             yield _sse("error", {"code": "llm_call_failed", "message": str(e), "retryable": True})
             return
 
+        # Per-turn timing — surfaces in Railway logs so we can see at a
+        # glance whether the LLM call (server-bound) or the rest of the
+        # loop is the dominant cost. Format chosen to be greppable:
+        #   agent.turn session=… turn=0 model=… llm_ms=842 tools=12 tokens=…/…
+        _log.info(
+            "agent.turn session=%s turn=%d model=%s llm_ms=%d tools=%d "
+            "prompt_tokens=%d completion_tokens=%d",
+            session_id, turn_num, DEFAULT_MODEL, dt_ms, len(tools),
+            int(llm_usage.get("prompt_tokens", 0) or 0),
+            int(llm_usage.get("completion_tokens", 0) or 0),
+        )
+
         # Best-effort usage tracking; never blocks the loop.
         try:
             await _usage.record_llm_usage(
