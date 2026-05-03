@@ -97,8 +97,17 @@ CLIENT_TOOL_SCHEMAS: dict[str, dict] = {
         "function": {
             "name": "open_url",
             "description": (
-                "Open a URL on the user's device. Use this for app-scheme links "
-                "like notion://, slack://, tel:, mailto:, or plain https://."
+                "Open a URL on the user's device. "
+                "When the user says 'open the X app' or names a specific app, "
+                "PREFER its native URL scheme so the app launches instead of a web page. "
+                "Common iOS schemes: "
+                "twitter:// (or x://), instagram://, slack://, notion://, "
+                "googlegmail:// (Gmail app), comgooglemaps:// (Google Maps), maps:// (Apple Maps), "
+                "youtube://, whatsapp://, spotify:, linkedin://, discord://, fb:// (Facebook), "
+                "tg:// (Telegram), reddit://, snapchat://, music:// (Apple Music), "
+                "tel:<number>, sms:<number>, mailto:<address>. "
+                "Only fall back to https://… when the user explicitly wants the website "
+                "(e.g. 'open uxie.ai') or when no app scheme exists."
             ),
             "parameters": {
                 "type": "object",
