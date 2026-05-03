@@ -298,7 +298,13 @@ async def _call_llm(messages: list[dict], tools: list[dict], model: str, provide
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         json=payload,
     )
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        body_preview = resp.text[:1000]
+        _log.error(
+            "llm.call provider=%s model=%s status=%s body=%s",
+            provider, model, resp.status_code, body_preview,
+        )
+        resp.raise_for_status()
     data = resp.json()
     dt_ms = int((time.perf_counter() - t0) * 1000)
     return data, dt_ms, (data.get("usage") or {})
@@ -553,7 +559,9 @@ async def _command_loop(
             return
 
         # ── 3. Has tool calls — record assistant turn, dispatch each call ──
-        messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
+        # Groq's Llama-3.3 rejects `content: null` on assistant turns even
+        # when tool_calls is populated; coerce to empty string.
+        messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
         await _append_turn(db, conversation_id, "assistant", content or "", tool_calls_json=tool_calls)
 
         for tc in tool_calls:
