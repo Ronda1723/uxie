@@ -36,7 +36,7 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 TOOLS: list[dict[str, Any]] = [
     {"type": "function", "function": {
         "name": "gmail_send",
-        "description": "Send an email via Gmail. Destructive — user will be asked to approve before it fires.",
+        "description": "Send an email via Gmail. USE THIS when the user says 'send', 'email X saying...', 'mail X about...', or any phrasing that implies the email should actually be delivered. The user will see an approval sheet before it fires, so you don't need to ask for confirmation in chat — just call this tool.",
         "parameters": {"type": "object", "properties": {
             "to": {"type": "string", "description": "Recipient email address"},
             "subject": {"type": "string"},
@@ -60,7 +60,7 @@ TOOLS: list[dict[str, Any]] = [
     }},
     {"type": "function", "function": {
         "name": "gmail_draft",
-        "description": "Create a Gmail draft (no email is sent until the user manually sends from Gmail).",
+        "description": "Create a Gmail draft only — no email is sent. ONLY use this when the user explicitly says 'draft', 'save a draft', or 'don't send yet'. Otherwise prefer gmail_send.",
         "parameters": {"type": "object", "properties": {
             "to": {"type": "string"},
             "subject": {"type": "string"},
