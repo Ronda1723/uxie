@@ -21,6 +21,21 @@ export function hideDockIcon(app: Electron.App): void {
 }
 
 /**
+ * Pin a window so it floats above everything — full-screen apps, screen
+ * savers, etc. macOS uses the "screen-saver" level and a Spaces flag so
+ * the window follows the user across desktops; Windows just needs plain
+ * alwaysOnTop (no Spaces equivalent and the level enum is mac-only).
+ */
+export function makeOverlayFloatTop(win: Electron.BrowserWindow): void {
+  if (IS_MAC) {
+    win.setAlwaysOnTop(true, "screen-saver");
+    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  } else {
+    win.setAlwaysOnTop(true);
+  }
+}
+
+/**
  * Bundle ID / executable name of the foreground app.
  *
  * On macOS we ask System Events via osascript — fast and reliable.

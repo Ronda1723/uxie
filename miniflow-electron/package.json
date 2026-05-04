@@ -1,7 +1,7 @@
 {
   "name": "miniflow-electron",
   "productName": "Uxie",
-  "version": "1.0.16",
+  "version": "1.0.19",
   "description": "Voice-powered desktop agent for macOS — Electron shell",
   "main": "build/main/index.js",
   "author": "Uxie",

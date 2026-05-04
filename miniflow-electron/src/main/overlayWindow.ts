@@ -10,6 +10,7 @@
 
 import { BrowserWindow, ipcMain, screen } from "electron";
 import path from "node:path";
+import { makeOverlayFloatTop } from "./platform";
 
 const WIDGET_WIDTH = 480;
 const DEFAULT_HEIGHT = 80;
@@ -44,9 +45,9 @@ export function createOverlayWindow(): BrowserWindow {
     },
   });
 
-  // Float above everything including full-screen apps and Spaces switches.
-  _overlay.setAlwaysOnTop(true, "screen-saver");
-  _overlay.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  // Float above everything including full-screen apps. Per-OS branching
+  // lives in platform.ts so this file stays clean of process.platform checks.
+  makeOverlayFloatTop(_overlay);
 
   const isDev = !require("electron").app.isPackaged;
   if (isDev) {
