@@ -35,6 +35,7 @@ import { registerIpc } from "./ipc";
 import { invoke } from "./api";
 import { IpcChannels } from "../shared/types";
 import { createOverlayWindow } from "./overlayWindow";
+import { onVoiceStart, onVoiceEnd } from "./widgetState";
 import { getFrontmostAppId, hideDockIcon } from "./platform";
 import { autoUpdater } from "electron-updater";
 
@@ -100,12 +101,16 @@ app.whenReady().then(async () => {
     const bundleID = getFrontmostAppId();
     console.log("[hotkey] bundleID:", bundleID);
     broadcast(IpcChannels.startCapture, { mode });
+    // Bring the floating widget up the moment the user begins holding fn,
+    // before any audio has been captured. Latency here = perceived snappiness.
+    onVoiceStart();
     invoke("start_listening", { sampleRate: 16000, mode, bundleID }).catch((e) =>
       console.error("start_listening failed:", e)
     );
   }
   function onRelease(mode: "dictation" | "command") {
     broadcast(IpcChannels.stopCapture, { mode });
+    onVoiceEnd("");
     invoke("stop_listening").catch((e) =>
       console.error("stop_listening failed:", e)
     );

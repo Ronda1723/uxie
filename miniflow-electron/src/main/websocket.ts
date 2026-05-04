@@ -6,7 +6,14 @@ import { EventEmitter } from "events";
 
 import { WS_URL } from "./api";
 import { IpcChannels } from "../shared/types";
-import { showOverlay, hideOverlay, createOverlayWindow } from "./overlayWindow";
+import {
+  onTranscriptionInterim,
+  onTranscriptionFinal,
+  onAgentStatus,
+  onActionResult,
+  onApprovalNeeded,
+  onApprovalResolved,
+} from "./widgetState";
 
 let ws: WebSocket | null = null;
 let getWindows: (() => BrowserWindow[]) = () => [];
@@ -43,12 +50,44 @@ export function connectWs(): void {
       // Fall through so the renderer can still surface it in the UI preview.
     }
 
-    // Floating overlay: show on approval-needed, hide on resolved/result
-    if (msg.event === "approval-needed") showOverlay();
-    if (msg.event === "approval-resolved") hideOverlay();
+    // Drive the floating widget state machine. setMode handles show/hide
+    // for us — no direct overlay calls from this file anymore.
+    routeToWidgetState(msg.event, msg.payload);
 
     forwardToRenderer(msg.event, msg.payload);
   });
+}
+
+function routeToWidgetState(event: string, payload: unknown): void {
+  const p = (payload ?? {}) as Record<string, unknown>;
+  switch (event) {
+    case "transcription-interim":
+      onTranscriptionInterim(typeof p.text === "string" ? p.text : "");
+      break;
+    case "transcription":
+      onTranscriptionFinal(typeof p.text === "string" ? p.text : "");
+      break;
+    case "agent-status":
+      onAgentStatus(typeof p.status === "string" ? p.status : String(p.status ?? ""));
+      break;
+    case "action-result":
+      onActionResult({
+        ok: typeof p.ok === "boolean" ? p.ok : undefined,
+        summary: typeof p.summary === "string" ? p.summary : undefined,
+        error: typeof p.error === "string" ? p.error : undefined,
+      });
+      break;
+    case "approval-needed":
+      onApprovalNeeded({
+        tool: String(p.tool ?? ""),
+        summary: String(p.summary ?? ""),
+        params: (p.params as Record<string, unknown>) ?? {},
+      });
+      break;
+    case "approval-resolved":
+      onApprovalResolved();
+      break;
+  }
 }
 
 function forwardToRenderer(event: string, payload: unknown): void {

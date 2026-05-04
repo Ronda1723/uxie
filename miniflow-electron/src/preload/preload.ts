@@ -120,6 +120,15 @@ const api = {
   sendApproval: (approved: boolean) =>
     ipcRenderer.invoke("agent:resolve-approval", approved),
 
+  // Capsule widget — single channel for every state from docs/widgets.md.
+  // Payload shape: { kind: "dictating" | "transcribing" | ... , ...fields }.
+  // Renderer updates its UI; main owns the actual show/hide of the window.
+  onWidgetState: (cb: (state: any) => void) => listen("widget:state", cb),
+
+  // Renderer reports its measured natural height after each state morph so
+  // the main process can resize the overlay window without a layout jump.
+  reportWidgetSize: (height: number) => ipcRenderer.send("widget:resize", height),
+
   // MCP connector management
   getMCPStatus:        () => ipcRenderer.invoke("mcp:getStatus"),
   connectMCPServer:    (serverId: string, credentials: Record<string, string>) =>
