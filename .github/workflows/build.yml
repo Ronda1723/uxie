@@ -15,7 +15,10 @@ jobs:
   # ── macOS (arm64) ────────────────────────────────────────────────────────
   build-macos:
     runs-on: macos-14   # arm64
-    timeout-minutes: 30
+    # Notarization queues with Apple's notary service can sit for 15-25 min
+    # on top of the ~10 min build, so this needs more headroom than the
+    # unsigned-build days. 60 min covers >99th percentile.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
