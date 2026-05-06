@@ -41,6 +41,12 @@ mac:
   gatekeeperAssess: false
   entitlements: resources/entitlements.mac.plist
   entitlementsInherit: resources/entitlements.mac.plist
+  # Notarize via Apple's notary service so Gatekeeper accepts the DMG
+  # without xattr / right-click bypass. electron-builder reads APPLE_ID
+  # and APPLE_APP_SPECIFIC_PASSWORD from env at build time; teamId is
+  # required here so the notary tool knows which team to sign under.
+  notarize:
+    teamId: YJMG4MF969
   extendInfo:
     NSMicrophoneUsageDescription: "Uxie needs microphone access for voice commands."
     NSAccessibilityUsageDescription: "Uxie types dictated text into the focused app."

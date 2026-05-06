@@ -45,11 +45,40 @@ jobs:
         run: npm ci
         working-directory: miniflow-electron
 
-      - name: Compile + package
+      - name: Import Developer ID Application cert into a fresh keychain
         env:
-          # No Apple notarization in CI yet; release later when the org
-          # Apple Developer account is approved.
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+        run: |
+          # Decode the .p12 from the secret into a temp file.
+          CERT_PATH=$RUNNER_TEMP/cert.p12
+          echo "$MAC_CERT_P12_BASE64" | base64 -d > "$CERT_PATH"
+
+          # Create a fresh keychain so we don't pollute the runner's defaults.
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$MAC_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Make the new keychain the search path so codesign finds the cert.
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+          # Sanity check.
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+          rm -f "$CERT_PATH"
+
+      - name: Compile, sign, and notarize
+        env:
+          # electron-builder picks these up automatically for codesign + notarize.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # We have a real Developer ID cert in the keychain now, let
+          # electron-builder discover and use it.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'true'
         run: |
           npm run build
           npx electron-builder --mac --arm64 --publish never
