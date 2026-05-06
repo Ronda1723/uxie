@@ -50,9 +50,24 @@ jobs:
           MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
           MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
         run: |
-          # Decode the .p12 from the secret into a temp file.
+          set -euo pipefail
           CERT_PATH=$RUNNER_TEMP/cert.p12
-          echo "$MAC_CERT_P12_BASE64" | base64 -d > "$CERT_PATH"
+
+          # Decode the base64 secret into the .p12 file. Use openssl with -A
+          # so whitespace/newlines from the secret store don't break decoding,
+          # and printf rather than echo so no trailing newline is appended.
+          printf '%s' "$MAC_CERT_P12_BASE64" | openssl base64 -d -A > "$CERT_PATH"
+
+          # Verify the decoded blob is a real PKCS12 before we try to import.
+          # PKCS12 files start with the magic bytes 0x30 0x82 (DER SEQUENCE).
+          BYTES=$(wc -c < "$CERT_PATH")
+          MAGIC=$(xxd -p -l 2 "$CERT_PATH")
+          echo "Decoded p12: $BYTES bytes, magic=$MAGIC"
+          if [ "$BYTES" -lt 1000 ] || [ "$MAGIC" != "3082" ]; then
+            echo "::error::p12 looks malformed — bytes=$BYTES magic=$MAGIC (expected 3082)."
+            echo "Re-encode locally with: base64 -i cert.p12 | pbcopy  and update the MAC_CERT_P12_BASE64 secret."
+            exit 1
+          fi
 
           # Create a fresh keychain so we don't pollute the runner's defaults.
           KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain-db
@@ -66,7 +81,7 @@ jobs:
           # Make the new keychain the search path so codesign finds the cert.
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
 
-          # Sanity check.
+          # Sanity check — must print one Developer ID Application identity.
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
           rm -f "$CERT_PATH"
 
