@@ -180,15 +180,18 @@ jobs:
             --entitlements "$ENT" \
             "$APP"
 
-      - name: Verify codesign + spctl before submitting (fail fast)
-        # If anything inside the .app isn't properly signed, this catches
-        # it in 30 sec instead of waiting for Apple to reject after 5 min.
+      - name: Verify codesign before submitting (fail fast)
+        # If anything inside the .app isn't properly signed, codesign --verify
+        # catches it in 30 sec instead of waiting for Apple to reject after
+        # 5 min. We do NOT use spctl here — spctl checks notarization status,
+        # which isn't satisfied yet (notarize happens after this step). The
+        # real spctl check runs at the very end on the stapled DMG.
         run: |
           set -euo pipefail
           APP="miniflow-electron/dist/mac-arm64/Uxie.app"
           codesign --verify --strict --verbose=2 "$APP"
-          codesign --display --verbose=2 "$APP" 2>&1 | grep -E "Authority|TeamIdentifier|Timestamp|Runtime"
-          spctl --assess --type execute --verbose=4 "$APP" 2>&1 | head -10
+          echo "--- signature details ---"
+          codesign --display --verbose=2 "$APP" 2>&1 | grep -E "Authority|TeamIdentifier|Timestamp|Runtime|Signed Time"
 
       - name: Repackage signed .app into a fresh DMG
         # The DMG electron-builder produced earlier wraps the .app from BEFORE
