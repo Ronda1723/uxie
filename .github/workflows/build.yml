@@ -121,8 +121,7 @@ jobs:
           xcrun notarytool history \
             --key "$API_KEY_PATH" \
             --key-id "$APPLE_API_KEY_ID" \
-            --issuer "$APPLE_API_ISSUER_ID" \
-            --output-format plain
+            --issuer "$APPLE_API_ISSUER_ID"
           echo "✓ API-key auth working"
 
       - name: Compile + codesign the .app
