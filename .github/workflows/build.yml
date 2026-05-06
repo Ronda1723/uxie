@@ -88,81 +88,154 @@ jobs:
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
           rm -f "$CERT_PATH"
 
+      - name: Materialize App Store Connect API key on disk
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        # Notarytool wants a real .p8 file path. The secret stores the .p8's
+        # contents base64-encoded so newlines survive the secret store and
+        # CI environment unmangled. Decoded shape: a PEM-style block that
+        # starts "-----BEGIN PRIVATE KEY-----" and ends "-----END PRIVATE KEY-----".
+        run: |
+          set -euo pipefail
+          mkdir -p $RUNNER_TEMP/apikey
+          P8=$RUNNER_TEMP/apikey/AuthKey_${APPLE_API_KEY_ID}.p8
+          printf '%s' "$APPLE_API_KEY_P8" | openssl base64 -d -A > "$P8"
+          chmod 600 "$P8"
+          if ! grep -q "BEGIN PRIVATE KEY" "$P8"; then
+            echo "::error::APPLE_API_KEY_P8 didn't decode to a PEM-formatted .p8 file"
+            head -1 "$P8" | xxd | head -1
+            exit 1
+          fi
+          echo "API_KEY_PATH=$P8" >> $GITHUB_ENV
+
       - name: Verify Apple notary credentials (fail fast)
         env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        # `notarytool history` is a no-op authentication probe — it returns
-        # in <5s on valid creds (printing prior submissions or "No results
-        # found"), and fails with a clear error on bad ones. Without this
-        # check, a wrong app-specific password can silently hang the
-        # subsequent electron-builder step for 30+ minutes.
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        # `notarytool history` is a no-op authentication probe — returns
+        # in <5s on valid creds, fails with a clear error on bad ones.
         timeout-minutes: 2
         run: |
           xcrun notarytool history \
-            --apple-id "$APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-            --output-format plain || true
-          # Empty submission history is fine (echo a marker so we know we
-          # actually returned from the call rather than being killed).
-          echo "credentials check returned"
+            --key "$API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --output-format plain
+          echo "✓ API-key auth working"
 
-      - name: Compile + codesign (no notarize)
+      - name: Compile + codesign the .app
         env:
+          # Let electron-builder discover the Developer ID cert from the
+          # keychain we set up earlier. We disable its built-in notarize
+          # because we control signing + notarization ourselves below.
           CSC_IDENTITY_AUTO_DISCOVERY: 'true'
         run: |
           npm run build
           npx electron-builder --mac --arm64 --publish never
         working-directory: miniflow-electron
 
-      - name: Submit DMG to Apple notary (no wait)
+      - name: Deep-sign every nested binary inside-out
+        # electron-builder signs the .app envelope but the PyInstaller
+        # bundle inside Contents/Resources/miniflow-engine has hundreds of
+        # nested .so/.dylib files plus a Python framework. Apple's notary
+        # requires every Mach-O to be signed individually with hardened
+        # runtime + secure timestamp by the same Developer ID. We do this
+        # manually, deepest first, then re-seal the .app.
+        run: |
+          set -euo pipefail
+          IDENTITY="Developer ID Application: Rounak Lenka (YJMG4MF969)"
+          APP="miniflow-electron/dist/mac-arm64/Uxie.app"
+          ENT="miniflow-electron/resources/entitlements.mac.plist"
+
+          # Find every Mach-O nested in Contents/Resources (PyInstaller bundle)
+          # plus any executable file. Sort -r so children are signed before
+          # their parent directories — Apple requires inside-out signing.
+          find "$APP/Contents/Resources" \
+            \( -name "*.so" -o -name "*.dylib" \) -type f -print0 \
+            | sort -zr \
+            | xargs -0 -P 4 -I {} codesign \
+                --force --options runtime --timestamp \
+                --sign "$IDENTITY" \
+                --entitlements "$ENT" \
+                "{}"
+
+          # Sign any executable that isn't a .so/.dylib (PyInstaller's
+          # bootstrap binary, embedded helper tools).
+          find "$APP/Contents/Resources" -type f -perm -u+x \
+            ! -name "*.so" ! -name "*.dylib" ! -name "*.png" ! -name "*.json" \
+            ! -name "*.txt" ! -name "*.html" ! -name "*.css" ! -name "*.js" \
+            ! -name "*.pyc" ! -name "*.py" -print0 2>/dev/null \
+            | while IFS= read -r -d '' f; do
+                if file "$f" | grep -q "Mach-O"; then
+                  codesign --force --options runtime --timestamp \
+                    --sign "$IDENTITY" --entitlements "$ENT" "$f"
+                fi
+              done
+
+          # Re-seal the .app at the top so the inner signatures get sealed
+          # in. NOT using --deep on purpose (Apple discourages it).
+          codesign --force --options runtime --timestamp \
+            --sign "$IDENTITY" \
+            --entitlements "$ENT" \
+            "$APP"
+
+      - name: Verify codesign + spctl before submitting (fail fast)
+        # If anything inside the .app isn't properly signed, this catches
+        # it in 30 sec instead of waiting for Apple to reject after 5 min.
+        run: |
+          set -euo pipefail
+          APP="miniflow-electron/dist/mac-arm64/Uxie.app"
+          codesign --verify --strict --verbose=2 "$APP"
+          codesign --display --verbose=2 "$APP" 2>&1 | grep -E "Authority|TeamIdentifier|Timestamp|Runtime"
+          spctl --assess --type execute --verbose=4 "$APP" 2>&1 | head -10
+
+      - name: Repackage signed .app into a fresh DMG
+        # The DMG electron-builder produced earlier wraps the .app from BEFORE
+        # we deep-signed the PyInstaller bundle. Throw it away and build a
+        # fresh DMG with hdiutil from the now-correctly-signed .app. Using
+        # hdiutil directly (instead of re-running electron-builder) avoids
+        # surprise re-signing.
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./miniflow-electron/package.json').version")
+          DMG_PATH="miniflow-electron/dist/Uxie-${VERSION}-arm64.dmg"
+          rm -f miniflow-electron/dist/Uxie-*.dmg
+          hdiutil create \
+            -volname "Uxie" \
+            -srcfolder "miniflow-electron/dist/mac-arm64/Uxie.app" \
+            -ov -format UDZO \
+            "$DMG_PATH"
+          # Codesign the DMG itself so the staple has something to attach to.
+          IDENTITY="Developer ID Application: Rounak Lenka (YJMG4MF969)"
+          codesign --force --sign "$IDENTITY" --timestamp "$DMG_PATH"
+          ls -la "$DMG_PATH"
+
+      - name: Notarize DMG via API key
         env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        # Submit and immediately return the submission ID. Apple processes
-        # in the background; a signed-but-unstapled DMG still launches on
-        # internet-connected Macs because Gatekeeper does an online check
-        # at first launch. Stapling happens in the next step with a tight
-        # timeout so the build doesn't sit on Apple's queue.
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        # API-key auth is Apple's recommended path. With proper inside-out
+        # signing it usually clears in 3-8 min. --wait blocks until verdict;
+        # we cap at 25 min for safety. Stapling happens immediately after.
+        timeout-minutes: 30
         run: |
           set -euo pipefail
           DMG=$(ls miniflow-electron/dist/Uxie-*.dmg | head -1)
-          echo "→ Submitting $DMG ($(du -h "$DMG" | cut -f1)) to Apple's notary…"
+          echo "→ Submitting $DMG ($(du -h "$DMG" | cut -f1)) via API key…"
           xcrun notarytool submit "$DMG" \
-            --apple-id "$APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-            --no-wait \
-            --output-format json | tee /tmp/submit.json
-          echo "DMG_PATH=$DMG" >> $GITHUB_ENV
-          echo "SUBMISSION_ID=$(/usr/bin/python3 -c "import json,sys; print(json.load(open('/tmp/submit.json'))['id'])")" >> $GITHUB_ENV
+            --key "$API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --wait \
+            --timeout 25m
 
-      - name: Wait for notarization + staple (best-effort, 12-min cap)
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        # Wait for the submission with a 12-min cap. If Apple takes longer,
-        # we ship the signed-but-unstapled DMG (still fully usable online).
-        # The submission ID is logged so we can finish stapling out-of-band
-        # later if needed.
-        timeout-minutes: 13
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          echo "→ Waiting on submission $SUBMISSION_ID …"
-          xcrun notarytool wait "$SUBMISSION_ID" \
-            --apple-id "$APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-            --timeout 12m
-          echo "→ Stapling"
-          xcrun stapler staple "$DMG_PATH"
-          xcrun stapler validate "$DMG_PATH"
-          echo "STAPLED=true" >> $GITHUB_ENV
+          echo "→ Stapling ticket onto DMG"
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          echo "→ Final spctl assessment"
+          spctl --assess --type install --verbose=4 "$DMG" || true
 
       - uses: actions/upload-artifact@v4
         with:
