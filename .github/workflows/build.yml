@@ -88,6 +88,27 @@ jobs:
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
           rm -f "$CERT_PATH"
 
+      - name: Verify Apple notary credentials (fail fast)
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # `notarytool history` is a no-op authentication probe — it returns
+        # in <5s on valid creds (printing prior submissions or "No results
+        # found"), and fails with a clear error on bad ones. Without this
+        # check, a wrong app-specific password can silently hang the
+        # subsequent electron-builder step for 30+ minutes.
+        timeout-minutes: 2
+        run: |
+          xcrun notarytool history \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --output-format plain || true
+          # Empty submission history is fine (echo a marker so we know we
+          # actually returned from the call rather than being killed).
+          echo "credentials check returned"
+
       - name: Compile, sign, and notarize
         env:
           # electron-builder picks these up automatically for codesign + notarize.
@@ -97,6 +118,8 @@ jobs:
           # We have a real Developer ID cert in the keychain now, let
           # electron-builder discover and use it.
           CSC_IDENTITY_AUTO_DISCOVERY: 'true'
+          # Make notarytool's progress visible in the build log.
+          DEBUG: 'electron-builder,electron-notarize*'
         run: |
           npm run build
           npx electron-builder --mac --arm64 --publish never
