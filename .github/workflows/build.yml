@@ -109,21 +109,38 @@ jobs:
           # actually returned from the call rather than being killed).
           echo "credentials check returned"
 
-      - name: Compile, sign, and notarize
+      - name: Compile + codesign (no notarize)
         env:
-          # electron-builder picks these up automatically for codesign + notarize.
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # We have a real Developer ID cert in the keychain now, let
-          # electron-builder discover and use it.
           CSC_IDENTITY_AUTO_DISCOVERY: 'true'
-          # Make notarytool's progress visible in the build log.
-          DEBUG: 'electron-builder,electron-notarize*'
         run: |
           npm run build
           npx electron-builder --mac --arm64 --publish never
         working-directory: miniflow-electron
+
+      - name: Notarize DMG via xcrun notarytool (verbose)
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # `notarytool submit --wait` uploads the artifact, polls Apple's
+        # notary service for verdict, and prints progress. Doing it
+        # ourselves (instead of through electron-builder's wrapper) means
+        # we see every transition rather than getting a silent hang.
+        run: |
+          set -euo pipefail
+          DMG=$(ls miniflow-electron/dist/Uxie-*.dmg | head -1)
+          echo "→ Submitting $DMG ($(du -h "$DMG" | cut -f1)) to Apple's notary…"
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --wait \
+            --timeout 30m
+          echo "→ Stapling ticket onto DMG"
+          xcrun stapler staple "$DMG"
+          echo "→ Verifying staple"
+          xcrun stapler validate "$DMG"
+          spctl --assess --type install -vv "$DMG" || true
 
       - uses: actions/upload-artifact@v4
         with:
