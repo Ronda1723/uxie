@@ -11,6 +11,7 @@ import {
   onTranscriptionFinal,
   onAgentStatus,
   onActionResult,
+  onActionChunk,
   onApprovalNeeded,
   onApprovalResolved,
 } from "./widgetState";
@@ -69,6 +70,9 @@ function routeToWidgetState(event: string, payload: unknown): void {
       break;
     case "agent-status":
       onAgentStatus(typeof p.status === "string" ? p.status : String(p.status ?? ""));
+      break;
+    case "action-chunk":
+      onActionChunk(typeof p.chunk === "string" ? p.chunk : "");
       break;
     case "action-result":
       onActionResult({

@@ -24,6 +24,20 @@ export type WidgetMode =
 
 let current: WidgetMode = { kind: "hidden" };
 let doneTimer: ReturnType<typeof setTimeout> | null = null;
+let safetyTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Last activity time across all modes — used so any new event resets the
+// "stuck capsule" safety timer.
+function armSafetyTimer(ms: number) {
+  if (safetyTimer) clearTimeout(safetyTimer);
+  safetyTimer = setTimeout(() => {
+    // If we're still in a "transient" state with no fresh activity, hide.
+    if (current.kind === "acting" || current.kind === "thinking" || current.kind === "transcribing") {
+      console.log("[widget] safety timer fired — clearing stuck state", current.kind);
+      setMode({ kind: "hidden" });
+    }
+  }, ms);
+}
 
 export function setMode(next: WidgetMode): void {
   if (doneTimer) { clearTimeout(doneTimer); doneTimer = null; }
@@ -31,6 +45,7 @@ export function setMode(next: WidgetMode): void {
 
   if (next.kind === "hidden") {
     hideOverlay();
+    if (safetyTimer) { clearTimeout(safetyTimer); safetyTimer = null; }
   } else {
     showOverlay();
   }
@@ -44,6 +59,13 @@ export function setMode(next: WidgetMode): void {
       // press could have moved us elsewhere by now.
       if (current.kind === "done") setMode({ kind: "hidden" });
     }, 1600);
+  }
+
+  // Transient states get a 30 s safety net. Any incoming event resets it.
+  // This prevents the capsule from sitting forever if the Python engine
+  // never emits a terminal event (action-result / final-text / done).
+  if (next.kind === "acting" || next.kind === "thinking" || next.kind === "transcribing") {
+    armSafetyTimer(30_000);
   }
 }
 
@@ -95,10 +117,31 @@ export function onTranscriptionFinal(text: string): void {
 }
 
 /** Generic agent-status events from Python. Strings vary; treat them as
- *  transient acting labels until a result lands. */
+ *  transient acting labels until a result lands.
+ *
+ *  Empty / "idle" / "done" statuses are treated as terminal — they mean
+ *  the engine has nothing more to report, so we hide rather than sit on
+ *  a stuck "Running" capsule forever. */
 export function onAgentStatus(status: string): void {
   if (current.kind === "review") return; // don't clobber the review card
+  const s = (status || "").trim().toLowerCase();
+  if (!s || s === "idle" || s === "done" || s === "completed" || s === "ready") {
+    setMode({ kind: "hidden" });
+    return;
+  }
   setMode({ kind: "acting", action: status });
+}
+
+/** Streamed dictation/grammar-correction chunk. Each chunk means progress;
+ *  treat it as a heartbeat that resets the safety timer. Dictation text is
+ *  being typed into the user's focused app, so we don't render anything
+ *  visible — just stay in the current state and let the next state event
+ *  (typically agent-status="idle" or action-result) close the widget. */
+export function onActionChunk(_chunk: string): void {
+  if (current.kind === "acting" || current.kind === "thinking" || current.kind === "transcribing") {
+    // Re-arm the 30 s safety net; chunks indicate the agent is alive.
+    setMode(current);
+  }
 }
 
 /** Action result — success or failure. */
