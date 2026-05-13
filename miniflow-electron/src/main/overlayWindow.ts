@@ -31,6 +31,10 @@ export function createOverlayWindow(): BrowserWindow {
     ...bounds,
     frame: false,
     transparent: true,
+    // Explicit transparent backing — without this Electron paints the page
+    // background color (defaults to white) underneath any transparent parts
+    // of the page, leaking a frame around the capsule.
+    backgroundColor: "#00000000",
     hasShadow: false,
     alwaysOnTop: true,
     resizable: false,

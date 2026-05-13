@@ -3,10 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <title>Uxie Overlay</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <!--
+      Intentionally NOT loading shared styles.css here — its html/body/#root
+      rule paints a cream background that bleeds through as a frame around
+      the floating capsule. The overlay only ever shows the capsule itself;
+      every other pixel must be fully transparent.
+    -->
     <style>
-      html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
-      #overlay-root { width: 100%; height: 100%; }
+      html, body {
+        margin: 0; padding: 0;
+        background: transparent !important;
+        overflow: hidden;
+        -webkit-font-smoothing: antialiased;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      }
+      #overlay-root { width: 100%; height: 100%; background: transparent; }
       @keyframes uxiePulse {
         0%, 100% { opacity: 0.55; transform: scale(1); }
         50%      { opacity: 1.0;  transform: scale(1.15); }
