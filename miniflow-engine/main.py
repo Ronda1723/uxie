@@ -379,6 +379,9 @@ _FAIL_HTML = """
 
 @app.get("/callback")
 async def oauth_callback(code: str = "", state: str = "", error: str = "", error_description: str = ""):
+    """Legacy local-loopback endpoint. New OAuth flow goes through Railway
+    and redirects to /oauth/{provider}/done instead — this route is
+    retained only for backward compatibility with old installs."""
     if error:
         log.error(f"OAuth error from provider: {error} — {error_description}")
         return HTMLResponse(_FAIL_HTML.format(error=error_description or error), status_code=400)
@@ -391,6 +394,19 @@ async def oauth_callback(code: str = "", state: str = "", error: str = "", error
     except Exception as e:
         log.error(f"OAuth callback error: {e}")
         return HTMLResponse(_FAIL_HTML.format(error=str(e)), status_code=400)
+
+
+@app.get("/oauth/{provider}/done")
+async def oauth_done(provider: str, error: str = "", message: str = ""):
+    """Railway redirects the user's browser here after a successful OAuth
+    handshake. We just confirm + notify the renderer so the Connectors UI
+    refreshes; the actual token already lives in Railway's DB."""
+    if error:
+        log.error(f"OAuth error from Railway for {provider}: {error} — {message}")
+        return HTMLResponse(_FAIL_HTML.format(error=message or error), status_code=400)
+    await manager.broadcast("oauth-connected", {"provider": provider})
+    log.info(f"OAuth complete via Railway: {provider}")
+    return HTMLResponse(_SUCCESS_HTML)
 
 # ── WebSocket endpoint ──
 

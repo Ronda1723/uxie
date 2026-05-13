@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import secrets
 import time
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 import fastapi
@@ -193,13 +194,19 @@ async def callback(
         )
     )).scalar_one_or_none()
 
+    # Compute expiry so the connector_token endpoint knows when to refresh.
+    expires_in = int(tok.get("expires_in") or 3600)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+
     if existing:
         existing.access_token = tok["access_token"]
         if tok.get("refresh_token"):
             existing.refresh_token = tok["refresh_token"]
         existing.token_type = tok.get("token_type", "Bearer")
         existing.scope = tok.get("scope")
+        existing.expires_at = expires_at
         existing.extra_json = {"id_token": tok.get("id_token")}
+        existing.updated_at = datetime.now(timezone.utc)
     else:
         db.add(OAuthToken(
             user_id=user_id,
@@ -208,6 +215,7 @@ async def callback(
             refresh_token=tok.get("refresh_token"),
             token_type=tok.get("token_type", "Bearer"),
             scope=tok.get("scope"),
+            expires_at=expires_at,
             extra_json={"id_token": tok.get("id_token")},
         ))
     await db.commit()

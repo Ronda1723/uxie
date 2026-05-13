@@ -113,16 +113,12 @@ TOOLS = GMAIL_TOOLS + CALENDAR_TOOLS + DRIVE_TOOLS
 # ── Helpers ──
 
 def _creds(token: dict):
+    # Tokens are minted (and refreshed) by Railway; we never see the
+    # refresh_token, client_id, or client_secret on the desktop. Pass
+    # only the bare access_token — google-auth then treats this as a
+    # static credential and won't try to refresh on its own.
     from google.oauth2.credentials import Credentials
-    import oauth as _oauth
-    cfg = _oauth.PROVIDERS["google"]
-    return Credentials(
-        token=token["access_token"],
-        refresh_token=token.get("refresh_token") or None,
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=cfg["client_id"],
-        client_secret=cfg["client_secret"],
-    )
+    return Credentials(token=token["access_token"])
 
 
 def _gmail_svc(token: dict):

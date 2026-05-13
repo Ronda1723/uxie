@@ -236,3 +236,9 @@ async def _disconnect(
 
 app.add_api_route("/user/connections", _list_connections, methods=["GET"])
 app.add_api_route("/user/connections/{provider}", _disconnect, methods=["DELETE"])
+
+# /user/connector_token/{provider} — hand a short-lived access_token to a
+# JWT-authenticated client. Mac engine uses this so it never needs the
+# provider's client_secret baked into the DMG.
+from connector_tokens import connector_token as _connector_token  # noqa: E402
+app.add_api_route("/user/connector_token/{provider}", _connector_token, methods=["GET"])
