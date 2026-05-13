@@ -38,6 +38,11 @@ _target_page_url: str | None = None  # set for browser tabs at recording start
 # ── Approval gate ─────────────────────────────────────────────────────────────
 _approval_event: asyncio.Event | None = None
 _approval_result: bool = False  # set by resolve_approval()
+# When the user edits params inline in the review card (e.g. fixes the
+# recipient or rewrites the body before clicking Send), the renderer ships
+# the diff back through resolve_approval. _approval_gate applies these to
+# the live `args` dict in place so all callers see the edits transparently.
+_approval_edited_params: dict | None = None
 
 # Tools that must be approved before execution
 APPROVAL_REQUIRED_TOOLS = {
@@ -68,11 +73,15 @@ TOOL_SUMMARIES = {
 
 
 async def _approval_gate(tool_name: str, args: dict) -> bool:
-    """Emit approval-needed, block until user responds or 60s timeout. Returns True if approved."""
-    global _approval_event, _approval_result
+    """Emit approval-needed, block until user responds or 60s timeout.
+    If the user edited any params in the review card, the edits are applied
+    to `args` in place before this function returns, so callers naturally
+    pick them up. Returns True if approved."""
+    global _approval_event, _approval_result, _approval_edited_params
     summary = TOOL_SUMMARIES.get(tool_name, lambda a: tool_name)(args)
     _approval_event = asyncio.Event()
     _approval_result = False
+    _approval_edited_params = None
     await _emit("approval-needed", {"tool": tool_name, "summary": summary, "params": args})
     try:
         await asyncio.wait_for(_approval_event.wait(), timeout=60.0)
@@ -80,13 +89,22 @@ async def _approval_gate(tool_name: str, args: dict) -> bool:
         log.warning(f"Approval timed out for {tool_name} — auto-cancelling")
         await _emit("approval-resolved", {"approved": False, "reason": "timeout"})
         return False
+    if _approval_result and _approval_edited_params:
+        # Apply user's edits to the live args dict. Only keys that already
+        # exist are accepted — the UI shouldn't be inventing new params.
+        for k, v in _approval_edited_params.items():
+            if k in args:
+                args[k] = v
+        log.info(f"Approval: {tool_name} args edited by user → {list(_approval_edited_params.keys())}")
     return _approval_result
 
 
-def resolve_approval(approved: bool):
-    """Called from the IPC handler when the user clicks Do it / Cancel."""
-    global _approval_result, _approval_event
+def resolve_approval(approved: bool, edited_params: dict | None = None):
+    """Called from the IPC handler when the user clicks Do it / Cancel.
+    `edited_params` is the diff the user changed inline before sending."""
+    global _approval_result, _approval_event, _approval_edited_params
     _approval_result = approved
+    _approval_edited_params = edited_params if isinstance(edited_params, dict) else None
     if _approval_event:
         _approval_event.set()
 _selected_text: str = ""  # captured at session start for transform commands

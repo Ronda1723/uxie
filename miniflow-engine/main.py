@@ -551,7 +551,10 @@ async def invoke(command: str, body: dict = {}):
         "logout_uxie":           lambda b: config.clear_jwt(),
         "get_uxie_user":         lambda b: config.get_uxie_user(),
         # Approval widget
-        "resolve_approval":      lambda b: agent.resolve_approval(bool(b.get("approved", False))),
+        "resolve_approval":      lambda b: agent.resolve_approval(
+            bool(b.get("approved", False)),
+            b.get("edited_params") if isinstance(b.get("edited_params"), dict) else None,
+        ),
         # MCP connector management
         "mcp_get_status":        lambda b: mcp_client.get_server_status(),
         "mcp_connect_server":    lambda b: _mcp_connect_server(b["server_id"], b.get("credentials", {})),

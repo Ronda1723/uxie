@@ -276,14 +276,80 @@ function ErrorState({ message }: { message: string }) {
   );
 }
 
-// ── Review (approval card — keeps the prior approval flow alive) ────────────
+// ── Review (approval card — fields are editable inline before Send) ─────────
+
+/** Tool kind → ordered list of [paramKey, label, kind] tuples for the form.
+ *  Falls through to the generic case for tools we haven't laid out yet. */
+function fieldSpec(tool: string, params: Record<string, unknown>): Array<{ key: string; label: string; kind: "line" | "block" | "mono" }> {
+  if (tool.startsWith("gmail")) {
+    return [
+      { key: "to",      label: "To",      kind: "mono" },
+      { key: "subject", label: "Subject", kind: "line" },
+      { key: "body",    label: "Body",    kind: "block" },
+    ];
+  }
+  if (tool.startsWith("create_calendar")) {
+    return [
+      { key: params.title !== undefined ? "title" : "summary", label: "Title", kind: "line" },
+      { key: params.start !== undefined ? "start" : "start_time", label: "Start", kind: "mono" },
+      { key: params.end   !== undefined ? "end"   : "end_time",   label: "End",   kind: "mono" },
+    ];
+  }
+  if (tool.startsWith("slack")) {
+    return [
+      { key: "channel", label: "Channel", kind: "mono" },
+      { key: params.text !== undefined ? "text" : "message", label: "Message", kind: "block" },
+    ];
+  }
+  // Generic fallback — every string/number param becomes an editable line.
+  return Object.entries(params)
+    .filter(([, v]) => v !== null && v !== undefined && typeof v !== "object")
+    .map(([k]) => ({ key: k, label: k, kind: "line" as const }));
+}
 
 function Review({ tool, summary, params }: { tool: string; summary: string; params: Record<string, unknown> }) {
+  // Local copy of params the user can edit inline. Initialised from the
+  // agent's proposed params; flushed back via sendApproval(true, edited).
+  const [edited, setEdited] = useState<Record<string, string>>(() => {
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(params)) {
+      if (v === null || v === undefined) continue;
+      out[k] = typeof v === "string" ? v : String(v);
+    }
+    return out;
+  });
+
+  // If a *new* approval request comes in (different tool/params), reset.
+  useEffect(() => {
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(params)) {
+      if (v === null || v === undefined) continue;
+      out[k] = typeof v === "string" ? v : String(v);
+    }
+    setEdited(out);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tool, JSON.stringify(params)]);
+
   function respond(approved: boolean) {
-    (window.miniflow as any).sendApproval?.(approved);
+    // Only send the edited diff back — keys whose value differs from the
+    // original. Saves bandwidth and avoids accidentally clobbering nested
+    // structures the user can't even see in the UI.
+    let diff: Record<string, unknown> | undefined;
+    if (approved) {
+      diff = {};
+      for (const [k, v] of Object.entries(edited)) {
+        const orig = params[k];
+        const origStr = orig == null ? "" : typeof orig === "string" ? orig : String(orig);
+        if (v !== origStr) diff[k] = v;
+      }
+      if (Object.keys(diff).length === 0) diff = undefined;
+    }
+    (window.miniflow as any).sendApproval?.(approved, diff);
   }
+
   const icon = TOOL_ICONS[tool] ?? "⚡";
   const label = TOOL_LABELS[tool] ?? tool;
+  const spec = fieldSpec(tool, params);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -293,9 +359,17 @@ function Review({ tool, summary, params }: { tool: string; summary: string; para
         <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#ff9f0a" }} />
       </div>
       <div style={{ height: 1, background: "rgba(255,255,255,0.07)" }} />
-      <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-        <ReviewFields tool={tool} params={params} />
-        {summary && !looksLikeStructuredTool(tool) && (
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {spec.map(({ key, label: l, kind }) => (
+          <EditableField
+            key={key}
+            label={l}
+            value={edited[key] ?? ""}
+            kind={kind}
+            onChange={(v) => setEdited((s) => ({ ...s, [key]: v }))}
+          />
+        ))}
+        {!spec.length && summary && (
           <span style={{ fontSize: 12, color: "rgba(255,255,255,0.85)", lineHeight: 1.4 }}>
             {summary}
           </span>
@@ -325,66 +399,53 @@ function Review({ tool, summary, params }: { tool: string; summary: string; para
   );
 }
 
-function looksLikeStructuredTool(tool: string): boolean {
-  return tool.startsWith("gmail") || tool.startsWith("create_calendar") || tool.startsWith("slack");
-}
-
-function ReviewFields({ tool, params }: { tool: string; params: Record<string, unknown> }) {
-  const v = (k: string) => {
-    const x = params[k];
-    return x == null ? "" : typeof x === "string" ? x : String(x);
+/** Editable single-line or multi-line field inside the review card. */
+function EditableField({
+  label, value, kind, onChange,
+}: {
+  label: string;
+  value: string;
+  kind: "line" | "block" | "mono";
+  onChange: (v: string) => void;
+}) {
+  const sharedStyle: React.CSSProperties = {
+    width: "100%",
+    background: "rgba(255,255,255,0.04)",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 8,
+    padding: "6px 10px",
+    color: "rgba(255,255,255,0.92)",
+    fontSize: 12,
+    lineHeight: 1.4,
+    fontFamily: kind === "mono" ? "'SF Mono', ui-monospace, monospace" : "inherit",
+    outline: "none",
+    boxSizing: "border-box",
+    resize: kind === "block" ? "vertical" : "none",
+    pointerEvents: "auto",
   };
-  if (tool.startsWith("gmail")) {
-    return (
-      <>
-        <Field label="To" value={v("to")} mono />
-        <Field label="Subject" value={v("subject")} />
-        <Field label="Body" value={v("body")} />
-      </>
-    );
-  }
-  if (tool.startsWith("create_calendar")) {
-    return (
-      <>
-        <Field label="Title" value={v("title") || v("summary")} />
-        <Field label="Start" value={v("start") || v("start_time")} />
-        <Field label="End" value={v("end") || v("end_time")} />
-      </>
-    );
-  }
-  if (tool.startsWith("slack")) {
-    return (
-      <>
-        <Field label="Channel" value={v("channel")} />
-        <Field label="Message" value={v("text") || v("message")} />
-      </>
-    );
-  }
   return (
-    <>
-      {Object.entries(params).map(([k, x]) =>
-        x ? <Field key={k} label={k} value={typeof x === "string" ? x : String(x)} /> : null
-      )}
-    </>
-  );
-}
-
-function Field({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  if (!value) return null;
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-      <span style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", letterSpacing: "0.07em" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span style={{
+        fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.4)",
+        textTransform: "uppercase", letterSpacing: "0.07em",
+      }}>
         {label}
       </span>
-      <span style={{
-        fontSize: 12, color: "rgba(255,255,255,0.85)", lineHeight: 1.4,
-        fontFamily: mono ? "'SF Mono', monospace" : "inherit",
-        wordBreak: "break-word",
-        maxHeight: 84, overflow: "hidden",
-        display: "-webkit-box", WebkitLineClamp: 5, WebkitBoxOrient: "vertical",
-      }}>
-        {value}
-      </span>
+      {kind === "block" ? (
+        <textarea
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          rows={Math.min(8, Math.max(2, value.split("\n").length))}
+          style={sharedStyle}
+        />
+      ) : (
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          style={sharedStyle}
+        />
+      )}
     </div>
   );
 }

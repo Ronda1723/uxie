@@ -98,12 +98,20 @@ export function registerIpc() {
     invoke("execute_command", { command: text })
   );
 
-  // Approval widget — user clicks "Do it" or "Cancel" (from overlay or in-app)
-  ipcMain.handle("agent:resolve-approval", async (_e, approved: boolean) => {
-    const { hideOverlay } = await import("./overlayWindow");
-    hideOverlay();
-    return invoke("resolve_approval", { approved });
-  });
+  // Approval widget — user clicks "Do it" or "Cancel" (from overlay or in-app).
+  // editedParams is the diff of the params the user changed inline before
+  // sending. The Python engine applies them in place before executing the tool.
+  ipcMain.handle(
+    "agent:resolve-approval",
+    async (_e, approved: boolean, editedParams: Record<string, unknown> | null) => {
+      const { hideOverlay } = await import("./overlayWindow");
+      hideOverlay();
+      return invoke("resolve_approval", {
+        approved,
+        edited_params: editedParams || null,
+      });
+    }
+  );
 
   // Permissions — onboarding modal reads + requests these
   ipcMain.handle(EXTRA.permGetAll, () => permissions.getAll());

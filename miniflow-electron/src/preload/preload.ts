@@ -117,8 +117,8 @@ const api = {
   // Approval widget
   onApprovalNeeded: (cb: (e: { tool: string; summary: string; params: Record<string, unknown> }) => void) =>
     listen("agent:approval-needed", cb),
-  sendApproval: (approved: boolean) =>
-    ipcRenderer.invoke("agent:resolve-approval", approved),
+  sendApproval: (approved: boolean, editedParams?: Record<string, unknown>) =>
+    ipcRenderer.invoke("agent:resolve-approval", approved, editedParams ?? null),
 
   // Capsule widget — single channel for every state from docs/widgets.md.
   // Payload shape: { kind: "dictating" | "transcribing" | ... , ...fields }.
