@@ -193,22 +193,31 @@ jobs:
           echo "--- signature details ---"
           codesign --display --verbose=2 "$APP" 2>&1 | grep -E "Authority|TeamIdentifier|Timestamp|Runtime|Signed Time"
 
-      - name: Repackage signed .app into a fresh DMG
+      - name: Repackage signed .app into a fresh DMG (with Applications shortcut)
         # The DMG electron-builder produced earlier wraps the .app from BEFORE
         # we deep-signed the PyInstaller bundle. Throw it away and build a
-        # fresh DMG with hdiutil from the now-correctly-signed .app. Using
-        # hdiutil directly (instead of re-running electron-builder) avoids
-        # surprise re-signing.
+        # fresh DMG from a staging dir that ALSO contains an "Applications"
+        # symlink so users can drag-install instead of seeing a bare app icon.
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./miniflow-electron/package.json').version")
           DMG_PATH="miniflow-electron/dist/Uxie-${VERSION}-arm64.dmg"
           rm -f miniflow-electron/dist/Uxie-*.dmg
+
+          # Build a staging directory with the .app + an Applications symlink
+          # so the mounted DMG looks like a normal "drag-to-install" volume.
+          STAGING=$RUNNER_TEMP/dmg-staging
+          rm -rf "$STAGING"
+          mkdir -p "$STAGING"
+          cp -R "miniflow-electron/dist/mac-arm64/Uxie.app" "$STAGING/"
+          ln -s /Applications "$STAGING/Applications"
+
           hdiutil create \
             -volname "Uxie" \
-            -srcfolder "miniflow-electron/dist/mac-arm64/Uxie.app" \
+            -srcfolder "$STAGING" \
             -ov -format UDZO \
             "$DMG_PATH"
+
           # Codesign the DMG itself so the staple has something to attach to.
           IDENTITY="Developer ID Application: Rounak Lenka (YJMG4MF969)"
           codesign --force --sign "$IDENTITY" --timestamp "$DMG_PATH"
