@@ -115,7 +115,7 @@ _TOKEN_CACHE_GRACE_SECONDS = 60
 
 
 def _railway_url(path: str) -> str:
-    return f"{config.get_backend_url()}{path}"
+    return f"{config.get_uxie_backend_url()}{path}"
 
 
 def _auth_headers() -> dict[str, str]:
@@ -218,7 +218,7 @@ def start_oauth(provider: str) -> str:
         raise RuntimeError("Sign in to Uxie first (no JWT in keychain)")
     redirect = f"{LOCAL_REDIRECT_BASE}/{provider}/done"
     qs = f"token={jwt}&redirect={redirect}"
-    return f"{config.get_backend_url()}/oauth/{provider}/start?{qs}"
+    return f"{config.get_uxie_backend_url()}/oauth/{provider}/start?{qs}"
 
 
 async def handle_callback(code: str, state: str) -> str:
