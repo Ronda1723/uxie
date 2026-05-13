@@ -26,8 +26,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import current_user
-from db import get_db
-from db_ios import OAuthToken, User
+from db import get_db, User
+from db_ios import OAuthToken
 from proxy import get_http
 from settings import get_settings
 
