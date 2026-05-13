@@ -254,6 +254,38 @@ jobs:
           path: miniflow-electron/dist/*.dmg
           if-no-files-found: error
 
+      - name: Publish DMG to uxie-app/uxie-releases as a draft release
+        # Drops the notarized DMG into the public releases repo so anyone in
+        # the world can download via GitHub's release CDN (Fastly, multi-PoP)
+        # instead of going through GitHub Actions artifacts (single-region,
+        # auth-only, no CDN — slow from India and Asia in particular).
+        #
+        # We create as a DRAFT so the public doesn't see every CI run; flip
+        # to published from the releases page when ready to ship.
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./miniflow-electron/package.json').version")
+          TAG="v$VERSION"
+          DMG=$(ls miniflow-electron/dist/Uxie-*.dmg | head -1)
+          REPO="uxie-app/uxie-releases"
+
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "→ Release $TAG exists, uploading DMG (replacing if present)"
+            gh release upload "$TAG" "$DMG" --repo "$REPO" --clobber
+          else
+            echo "→ Creating draft release $TAG"
+            gh release create "$TAG" \
+              --repo "$REPO" \
+              --draft \
+              --title "Uxie $TAG" \
+              --notes "Built from uxie-app/uxie@${GITHUB_SHA::7}"
+            sleep 5
+            gh release upload "$TAG" "$DMG" --repo "$REPO" --clobber
+          fi
+          echo "✓ DMG uploaded to https://github.com/$REPO/releases/tag/$TAG"
+
   # ── Windows (x64) ────────────────────────────────────────────────────────
   # First-class Windows builds run here so they don't depend on a laptop.
   # The runner has Node + Python + MSVC out of the box; we only need to
@@ -312,4 +344,33 @@ jobs:
         with:
           name: Uxie-windows-x64
           path: miniflow-electron/dist/*.exe
+
+      - name: Publish EXE to uxie-app/uxie-releases as a draft release
+        # Same global-CDN distribution path as the Mac job. Both jobs target
+        # the same tag so the release ends up with both DMG + EXE under one
+        # version, matching the "Mac+Win paired release" rule.
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./miniflow-electron/package.json').version")
+          TAG="v$VERSION"
+          EXE=$(ls miniflow-electron/dist/Uxie*.exe | head -1)
+          REPO="uxie-app/uxie-releases"
+
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "→ Release $TAG exists, uploading EXE (replacing if present)"
+            gh release upload "$TAG" "$EXE" --repo "$REPO" --clobber
+          else
+            echo "→ Creating draft release $TAG"
+            gh release create "$TAG" \
+              --repo "$REPO" \
+              --draft \
+              --title "Uxie $TAG" \
+              --notes "Built from uxie-app/uxie@${GITHUB_SHA::7}"
+            sleep 5
+            gh release upload "$TAG" "$EXE" --repo "$REPO" --clobber
+          fi
+          echo "✓ EXE uploaded to https://github.com/$REPO/releases/tag/$TAG"
           if-no-files-found: error
