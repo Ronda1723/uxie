@@ -102,8 +102,17 @@ fn evaluate(
 ) -> Option<OutEvent> {
     let flags = event.get_flags();
 
-    // Modifier-only binding (e.g. bare Fn)
+    // Modifier-only binding (e.g. bare Fn).
+    //
+    // We only respond to `FlagsChanged` events here — that's what the OS
+    // emits when a modifier key transitions. Apple keyboards also stamp
+    // the SecondaryFn flag on regular key events (arrow keys, F-keys,
+    // Help, Page Up/Down, etc), so without this filter every right-arrow
+    // press would trigger dictation press/release.
     if binding.is_modifier_only() {
+        if etype != CGEventType::FlagsChanged {
+            return None;
+        }
         let m = binding.modifier?;
         let required = modifier_bit(m);
         let is_down_now = flags.contains(required);
