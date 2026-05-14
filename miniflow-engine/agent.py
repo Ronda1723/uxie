@@ -273,8 +273,30 @@ ANY WEBSITE — booking, forms, reading, ordering:
 GMAIL (gmail_search, gmail_read, gmail_send, gmail_reply, gmail_draft):
   CRITICAL: "email", "mail", "gmail", "मेल", "correo" → MUST use gmail tool.
   - Send → gmail_send  |  Draft → gmail_draft  |  Search → gmail_search
-  - Reply flow: gmail_search → gmail_read (get threadId) → gmail_reply
   - Summary format: "From: X | Subject: Y | Summary: …"
+
+  CONTEXT FROM PRIOR THREADS — ALWAYS pull context before composing if any of
+  these apply. Don't ship a blind email when the thread already exists.
+
+  When to fetch context FIRST (gmail_search → gmail_read → then send/reply):
+    * "reply to X" / "respond to X" / "answer X"  → search for the open thread
+    * "follow up with X about Y" / "ping X again" → search "from:X Y" recent
+    * "send X about Y" where Y is an ongoing topic → search "Y" first
+    * any phrasing that implies a continuation: "as we discussed", "the
+      proposal", "that meeting", "your last email" → search to recover
+      what they mean
+    * if a thread is mentioned by subject, use gmail_search to locate it,
+      gmail_read to load the body, then compose with that context inline
+      in the new message
+
+  When NOT to bother (skip search, go straight to gmail_send):
+    * brand-new outreach to a contact: "email john@x.com saying hi"
+    * the user dictates the full body themselves
+    * forward-only / share-link content with no thread context
+
+  Reply mechanics: gmail_search → gmail_read (returns threadId) → gmail_reply
+  with that threadId. For a fresh-but-context-aware send, summarize the
+  prior thread in your message body so the recipient sees the lineage.
 
 GOOGLE CALENDAR (calendar_list_events, calendar_create_event, calendar_check_availability):
   CRITICAL: "meeting", "schedule", "book time", "calendar", "appointment" → use calendar tool.
