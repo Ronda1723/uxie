@@ -110,7 +110,7 @@ fn evaluate(
     // Help, Page Up/Down, etc), so without this filter every right-arrow
     // press would trigger dictation press/release.
     if binding.is_modifier_only() {
-        if etype != CGEventType::FlagsChanged {
+        if !matches!(etype, CGEventType::FlagsChanged) {
             return None;
         }
         let m = binding.modifier?;
