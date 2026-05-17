@@ -7,9 +7,24 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: 'Upload artifacts to a GitHub Release (requires tag or version input)'
+        description: 'Legacy flag (unused) — uploads to release always happen.'
         required: false
         default: 'false'
+      auto_publish:
+        description: 'Flip the draft release to PUBLISHED after both Mac + Windows succeed. Set to true when you are ready to ship.'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+  # Tag-push trigger: pushing a `v*` tag (e.g. `git tag v1.0.27 && git push --tags`)
+  # automatically builds AND publishes — useful for cutting a release from
+  # your local terminal without opening the Actions UI.
+  push:
+    tags:
+      - 'v*.*.*'
 
 jobs:
   # ── macOS (arm64) ────────────────────────────────────────────────────────
@@ -248,30 +263,51 @@ jobs:
           echo "→ Final spctl assessment"
           spctl --assess --type install --verbose=4 "$DMG" || true
 
-      - name: Generate latest-mac.yml for electron-updater
-        # electron-updater reads this YAML from the releases repo on every
-        # launch to decide whether a newer version exists. Without it the
-        # auto-updater can't see our DMGs. We generate it manually rather
-        # than relying on electron-builder --publish because we ship a
-        # custom-built DMG (deep-signed + hdiutil-repackaged) that
-        # electron-builder doesn't know about.
+      - name: Package signed .app as a notarised ZIP for auto-update
+        # electron-updater on macOS REQUIRES a .zip of the .app for in-place
+        # auto-updates (DMG can't be applied without user drag-install).
+        # ditto -c -k --sequesterRsrc --keepParent is the Apple-blessed
+        # way to archive a signed app bundle so the inner signatures are
+        # preserved verbatim.
         run: |
           set -euo pipefail
-          DMG=$(ls miniflow-electron/dist/Uxie-*.dmg | head -1)
-          DMG_NAME=$(basename "$DMG")
+          APP="miniflow-electron/dist/mac-arm64/Uxie.app"
           VERSION=$(node -p "require('./miniflow-electron/package.json').version")
-          SIZE=$(wc -c < "$DMG" | tr -d ' ')
-          SHA512=$(shasum -a 512 "$DMG" | awk '{print $1}' | xxd -r -p | base64 | tr -d '\n')
+          ZIP_PATH="miniflow-electron/dist/Uxie-${VERSION}-arm64.zip"
+          rm -f "$ZIP_PATH"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP_PATH"
+          ls -la "$ZIP_PATH"
+
+      - name: Generate latest-mac.yml for electron-updater
+        # The YAML must reference the ZIP as the primary `path` (that's what
+        # electron-updater downloads + extracts to swap the .app in place).
+        # The DMG is also listed for visibility but isn't the update target.
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./miniflow-electron/package.json').version")
+          DMG="miniflow-electron/dist/Uxie-${VERSION}-arm64.dmg"
+          ZIP="miniflow-electron/dist/Uxie-${VERSION}-arm64.zip"
+          DMG_NAME=$(basename "$DMG"); ZIP_NAME=$(basename "$ZIP")
+
+          # base64-encoded SHA-512 of each file (electron-updater spec).
+          dmg_sha512=$(shasum -a 512 "$DMG" | awk '{print $1}' | xxd -r -p | base64 | tr -d '\n')
+          zip_sha512=$(shasum -a 512 "$ZIP" | awk '{print $1}' | xxd -r -p | base64 | tr -d '\n')
+          dmg_size=$(wc -c < "$DMG" | tr -d ' ')
+          zip_size=$(wc -c < "$ZIP" | tr -d ' ')
           DATE=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+
           YML="miniflow-electron/dist/latest-mac.yml"
           cat > "$YML" <<EOF
           version: $VERSION
           files:
+            - url: $ZIP_NAME
+              sha512: $zip_sha512
+              size: $zip_size
             - url: $DMG_NAME
-              sha512: $SHA512
-              size: $SIZE
-          path: $DMG_NAME
-          sha512: $SHA512
+              sha512: $dmg_sha512
+              size: $dmg_size
+          path: $ZIP_NAME
+          sha512: $zip_sha512
           releaseDate: '$DATE'
           EOF
           echo "→ Generated $YML"
@@ -282,6 +318,7 @@ jobs:
           name: Uxie-macos-arm64
           path: |
             miniflow-electron/dist/*.dmg
+            miniflow-electron/dist/*.zip
             miniflow-electron/dist/latest-mac.yml
           if-no-files-found: error
 
@@ -300,11 +337,12 @@ jobs:
           VERSION=$(node -p "require('./miniflow-electron/package.json').version")
           TAG="v$VERSION"
           DMG=$(ls miniflow-electron/dist/Uxie-*.dmg | head -1)
+          ZIP=$(ls miniflow-electron/dist/Uxie-*.zip | head -1)
           YML=miniflow-electron/dist/latest-mac.yml
           REPO="uxie-app/uxie-releases"
 
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            echo "→ Release $TAG exists, uploading DMG + latest-mac.yml"
+            echo "→ Release $TAG exists, uploading DMG + ZIP + latest-mac.yml"
           else
             echo "→ Creating draft release $TAG"
             gh release create "$TAG" \
@@ -314,8 +352,8 @@ jobs:
               --notes "Built from uxie-app/uxie@${GITHUB_SHA::7}"
             sleep 5
           fi
-          gh release upload "$TAG" "$DMG" "$YML" --repo "$REPO" --clobber
-          echo "✓ DMG + latest-mac.yml uploaded to https://github.com/$REPO/releases/tag/$TAG"
+          gh release upload "$TAG" "$DMG" "$ZIP" "$YML" --repo "$REPO" --clobber
+          echo "✓ DMG + ZIP + latest-mac.yml uploaded to https://github.com/$REPO/releases/tag/$TAG"
 
   # ── Windows (x64) ────────────────────────────────────────────────────────
   # First-class Windows builds run here so they don't depend on a laptop.
@@ -438,3 +476,40 @@ jobs:
           fi
           gh release upload "$TAG" "$EXE" "$YML" --repo "$REPO" --clobber
           echo "✓ EXE + latest.yml uploaded to https://github.com/$REPO/releases/tag/$TAG"
+
+  # ── Auto-publish (optional) ─────────────────────────────────────────────
+  # Flips the draft release to PUBLISHED once both Mac + Windows succeed.
+  # Triggered automatically when:
+  #   - the workflow was kicked off by pushing a `v*.*.*` tag, OR
+  #   - workflow_dispatch was run with auto_publish = 'true'
+  #
+  # Otherwise the release stays draft and the developer can publish via
+  # the GitHub UI when ready. This keeps "build for testing" and "ship to
+  # users" as separate explicit actions.
+  publish-release:
+    needs: [build-macos, build-windows]
+    if: success() && (github.event_name == 'push' || github.event.inputs.auto_publish == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Flip draft → published on uxie-releases
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          set -euo pipefail
+          # On tag push GITHUB_REF_NAME is the tag (e.g. v1.0.27).
+          # On workflow_dispatch we read the version from package.json on
+          # the same commit and derive the tag.
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            # No package.json here — pull from the repo via the API.
+            VERSION=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/uxie-app/uxie/contents/miniflow-electron/package.json?ref=${GITHUB_SHA}" \
+              | python3 -c "import sys,json,base64; raw=base64.b64decode(json.load(sys.stdin)['content']); print(json.loads(raw)['version'])")
+            TAG="v$VERSION"
+          fi
+          echo "→ Publishing release $TAG on uxie-app/uxie-releases"
+          gh release edit "$TAG" --repo uxie-app/uxie-releases --draft=false
+          echo "✓ $TAG is now public:"
+          echo "  https://github.com/uxie-app/uxie-releases/releases/tag/$TAG"
