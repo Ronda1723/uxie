@@ -97,13 +97,12 @@ export function MeetingsTab() {
     };
   }, [refresh, checkConnection]);
 
-  if (connected === null) return null;
-
   const onConnected = useCallback(() => {
     checkConnection();
     refresh();
   }, [checkConnection, refresh]);
 
+  if (connected === null) return null;
   if (!connected) return <ConnectCalendarEmptyState onConnected={onConnected} />;
 
   const selected = meetings.find((m) => m.id === selectedId) ?? null;
