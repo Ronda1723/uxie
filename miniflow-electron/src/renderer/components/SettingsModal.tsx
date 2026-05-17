@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { HotkeySettings } from "./HotkeyRecorder";
 
-type SettingsTab = "account" | "hotkey" | "connectors";
+type SettingsTab = "account" | "hotkey" | "connectors" | "updates";
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<SettingsTab>("account");
@@ -14,13 +14,154 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           <button className={`modal-tab ${tab === "account"    ? "active" : ""}`} onClick={() => setTab("account")}>Account</button>
           <button className={`modal-tab ${tab === "connectors" ? "active" : ""}`} onClick={() => setTab("connectors")}>Connectors</button>
           <button className={`modal-tab ${tab === "hotkey"     ? "active" : ""}`} onClick={() => setTab("hotkey")}>Hotkey</button>
+          <button className={`modal-tab ${tab === "updates"    ? "active" : ""}`} onClick={() => setTab("updates")}>Updates</button>
           <button className="modal-close" onClick={onClose} aria-label="Close">✕</button>
         </div>
         <div className="modal-body">
           {tab === "account"    && <AccountTab />}
           {tab === "connectors" && <ConnectorsTab />}
           {tab === "hotkey"     && <HotkeySettings />}
+          {tab === "updates"    && <UpdatesTab />}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Updates tab ───────────────────────────────────────────────────────────────
+
+type UpdatePhase = "idle" | "checking" | "available" | "not-available" | "downloading" | "downloaded" | "error";
+
+function UpdatesTab() {
+  const mf = window.miniflow as any;
+  const [currentVersion, setCurrentVersion] = useState<string>("");
+  const [phase, setPhase] = useState<UpdatePhase>("idle");
+  const [availableVersion, setAvailableVersion] = useState<string>("");
+  const [progressPct, setProgressPct] = useState<number>(0);
+  const [errMsg, setErrMsg] = useState<string>("");
+
+  useEffect(() => {
+    mf.getAppVersion?.().then((v: string) => setCurrentVersion(v || ""));
+
+    const unsub = mf.onUpdaterEvent?.((e: { kind: string; payload: any }) => {
+      switch (e.kind) {
+        case "checking-for-update":
+          setPhase("checking"); setErrMsg("");
+          break;
+        case "update-available":
+          setPhase("available");
+          setAvailableVersion(e.payload?.version ?? "");
+          break;
+        case "update-not-available":
+          setPhase("not-available");
+          break;
+        case "download-progress":
+          setPhase("downloading");
+          setProgressPct(Math.round(e.payload?.percent ?? 0));
+          break;
+        case "update-downloaded":
+          setPhase("downloaded");
+          setAvailableVersion(e.payload?.version ?? availableVersion);
+          break;
+        case "error":
+          setPhase("error");
+          setErrMsg(String(e.payload?.message ?? e.payload ?? "Unknown error"));
+          break;
+      }
+    });
+    return () => { try { unsub?.(); } catch {} };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function check() {
+    setPhase("checking"); setErrMsg("");
+    const r = await mf.checkForUpdate?.();
+    if (!r?.ok) {
+      setPhase("error");
+      setErrMsg(r?.reason ?? "Couldn't reach the update server. Are you online?");
+    }
+    // success path is handled via onUpdaterEvent (update-available / update-not-available)
+  }
+
+  async function download() {
+    const r = await mf.downloadUpdate?.();
+    if (!r?.ok) {
+      setPhase("error");
+      setErrMsg(r?.reason ?? "Download failed.");
+    }
+  }
+
+  function installNow() {
+    mf.installUpdateNow?.();
+  }
+
+  return (
+    <div className="stack">
+      <div className="field">
+        <label>Current version</label>
+        <div style={{ fontSize: 13, color: "var(--text-primary)", fontWeight: 500 }}>
+          {currentVersion ? `v${currentVersion}` : "—"}
+        </div>
+      </div>
+
+      {phase === "idle" || phase === "checking" || phase === "not-available" || phase === "error" ? (
+        <div className="row">
+          <button className="btn-primary" onClick={check} disabled={phase === "checking"}>
+            {phase === "checking" ? "Checking…" : "Check for updates"}
+          </button>
+          {phase === "not-available" && (
+            <span style={{ fontSize: 12, color: "var(--text-muted)", marginLeft: 10 }}>
+              You're on the latest version.
+            </span>
+          )}
+        </div>
+      ) : null}
+
+      {phase === "available" && (
+        <div className="field">
+          <label>Update available</label>
+          <div style={{ fontSize: 13, marginBottom: 8 }}>
+            <strong>v{availableVersion}</strong> is available.
+          </div>
+          <div className="row">
+            <button className="btn-primary" onClick={download}>Download update</button>
+          </div>
+        </div>
+      )}
+
+      {phase === "downloading" && (
+        <div className="field">
+          <label>Downloading v{availableVersion}…</label>
+          <div style={{
+            height: 6, background: "var(--surface-2)", borderRadius: 3, overflow: "hidden", margin: "6px 0",
+          }}>
+            <div style={{
+              width: `${progressPct}%`, height: "100%", background: "var(--accent)",
+              transition: "width 200ms ease-out",
+            }} />
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{progressPct}%</div>
+        </div>
+      )}
+
+      {phase === "downloaded" && (
+        <div className="field">
+          <label>Ready to install</label>
+          <div style={{ fontSize: 13, marginBottom: 8 }}>
+            <strong>v{availableVersion}</strong> downloaded. Restart Uxie to install.
+          </div>
+          <div className="row">
+            <button className="btn-primary" onClick={installNow}>Restart &amp; install</button>
+          </div>
+        </div>
+      )}
+
+      {errMsg && (
+        <div className="error-msg" style={{ marginTop: 8 }}>{errMsg}</div>
+      )}
+
+      <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 8 }}>
+        Uxie auto-checks for updates at launch. You can install whenever you want — your work isn't interrupted.
       </div>
     </div>
   );

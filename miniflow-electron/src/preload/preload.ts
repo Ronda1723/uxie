@@ -145,6 +145,18 @@ const api = {
   openExternal:   (url: string) => ipcRenderer.invoke(CH.openExternal, url),
   quit:           () => ipcRenderer.invoke(CH.quit),
 
+  // Auto-updater (Settings → Check for updates)
+  // checkForUpdate: hits GitHub Releases, returns { ok, current, updateInfo }.
+  // downloadUpdate: fetches the newer DMG/EXE in the background.
+  // installNow: quits and installs the downloaded update.
+  // onUpdaterEvent: stream of lifecycle events (checking, available, progress, downloaded, error).
+  checkForUpdate:   () => ipcRenderer.invoke("updater:check"),
+  downloadUpdate:   () => ipcRenderer.invoke("updater:download"),
+  installUpdateNow: () => ipcRenderer.invoke("updater:installNow"),
+  getAppVersion:    () => ipcRenderer.invoke("updater:version"),
+  onUpdaterEvent:   (cb: (e: { kind: string; payload: any }) => void) =>
+    listen("updater:event", cb),
+
   // Helper
   requestType:    (text: string) => ipcRenderer.send("helper:type", text),
 

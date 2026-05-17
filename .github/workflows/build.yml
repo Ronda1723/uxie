@@ -248,10 +248,41 @@ jobs:
           echo "→ Final spctl assessment"
           spctl --assess --type install --verbose=4 "$DMG" || true
 
+      - name: Generate latest-mac.yml for electron-updater
+        # electron-updater reads this YAML from the releases repo on every
+        # launch to decide whether a newer version exists. Without it the
+        # auto-updater can't see our DMGs. We generate it manually rather
+        # than relying on electron-builder --publish because we ship a
+        # custom-built DMG (deep-signed + hdiutil-repackaged) that
+        # electron-builder doesn't know about.
+        run: |
+          set -euo pipefail
+          DMG=$(ls miniflow-electron/dist/Uxie-*.dmg | head -1)
+          DMG_NAME=$(basename "$DMG")
+          VERSION=$(node -p "require('./miniflow-electron/package.json').version")
+          SIZE=$(wc -c < "$DMG" | tr -d ' ')
+          SHA512=$(shasum -a 512 "$DMG" | awk '{print $1}' | xxd -r -p | base64 | tr -d '\n')
+          DATE=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+          YML="miniflow-electron/dist/latest-mac.yml"
+          cat > "$YML" <<EOF
+          version: $VERSION
+          files:
+            - url: $DMG_NAME
+              sha512: $SHA512
+              size: $SIZE
+          path: $DMG_NAME
+          sha512: $SHA512
+          releaseDate: '$DATE'
+          EOF
+          echo "→ Generated $YML"
+          cat "$YML"
+
       - uses: actions/upload-artifact@v4
         with:
           name: Uxie-macos-arm64
-          path: miniflow-electron/dist/*.dmg
+          path: |
+            miniflow-electron/dist/*.dmg
+            miniflow-electron/dist/latest-mac.yml
           if-no-files-found: error
 
       - name: Publish DMG to uxie-app/uxie-releases as a draft release
@@ -269,11 +300,11 @@ jobs:
           VERSION=$(node -p "require('./miniflow-electron/package.json').version")
           TAG="v$VERSION"
           DMG=$(ls miniflow-electron/dist/Uxie-*.dmg | head -1)
+          YML=miniflow-electron/dist/latest-mac.yml
           REPO="uxie-app/uxie-releases"
 
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            echo "→ Release $TAG exists, uploading DMG (replacing if present)"
-            gh release upload "$TAG" "$DMG" --repo "$REPO" --clobber
+            echo "→ Release $TAG exists, uploading DMG + latest-mac.yml"
           else
             echo "→ Creating draft release $TAG"
             gh release create "$TAG" \
@@ -282,9 +313,9 @@ jobs:
               --title "Uxie $TAG" \
               --notes "Built from uxie-app/uxie@${GITHUB_SHA::7}"
             sleep 5
-            gh release upload "$TAG" "$DMG" --repo "$REPO" --clobber
           fi
-          echo "✓ DMG uploaded to https://github.com/$REPO/releases/tag/$TAG"
+          gh release upload "$TAG" "$DMG" "$YML" --repo "$REPO" --clobber
+          echo "✓ DMG + latest-mac.yml uploaded to https://github.com/$REPO/releases/tag/$TAG"
 
   # ── Windows (x64) ────────────────────────────────────────────────────────
   # First-class Windows builds run here so they don't depend on a laptop.
@@ -340,10 +371,43 @@ jobs:
           npx electron-builder --win --x64 --publish never
         working-directory: miniflow-electron
 
+      - name: Generate latest.yml for electron-updater (Windows)
+        # electron-builder writes latest.yml itself for --win, but we
+        # double-check it exists and regenerate from scratch if it's
+        # missing (some electron-builder versions skip yml when
+        # --publish=never).
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd miniflow-electron
+          if [ ! -f dist/latest.yml ]; then
+            EXE=$(ls dist/Uxie*.exe | head -1)
+            EXE_NAME=$(basename "$EXE")
+            VERSION=$(node -p "require('./package.json').version")
+            SIZE=$(wc -c < "$EXE" | tr -d ' ')
+            SHA512=$(certutil -hashfile "$EXE" SHA512 | sed -n 2p | tr -d ' \r\n' | xxd -r -p | base64 -w0 || \
+              sha512sum "$EXE" | awk '{print $1}' | xxd -r -p | base64 -w0)
+            DATE=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+            cat > dist/latest.yml <<EOF
+          version: $VERSION
+          files:
+            - url: $EXE_NAME
+              sha512: $SHA512
+              size: $SIZE
+          path: $EXE_NAME
+          sha512: $SHA512
+          releaseDate: '$DATE'
+          EOF
+          fi
+          echo "→ latest.yml:"
+          cat dist/latest.yml
+
       - uses: actions/upload-artifact@v4
         with:
           name: Uxie-windows-x64
-          path: miniflow-electron/dist/*.exe
+          path: |
+            miniflow-electron/dist/*.exe
+            miniflow-electron/dist/latest.yml
           if-no-files-found: error
 
       - name: Publish EXE to uxie-app/uxie-releases as a draft release
@@ -358,11 +422,11 @@ jobs:
           VERSION=$(node -p "require('./miniflow-electron/package.json').version")
           TAG="v$VERSION"
           EXE=$(ls miniflow-electron/dist/Uxie*.exe | head -1)
+          YML=miniflow-electron/dist/latest.yml
           REPO="uxie-app/uxie-releases"
 
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            echo "→ Release $TAG exists, uploading EXE (replacing if present)"
-            gh release upload "$TAG" "$EXE" --repo "$REPO" --clobber
+            echo "→ Release $TAG exists, uploading EXE + latest.yml"
           else
             echo "→ Creating draft release $TAG"
             gh release create "$TAG" \
@@ -371,6 +435,6 @@ jobs:
               --title "Uxie $TAG" \
               --notes "Built from uxie-app/uxie@${GITHUB_SHA::7}"
             sleep 5
-            gh release upload "$TAG" "$EXE" --repo "$REPO" --clobber
           fi
-          echo "✓ EXE uploaded to https://github.com/$REPO/releases/tag/$TAG"
+          gh release upload "$TAG" "$EXE" "$YML" --repo "$REPO" --clobber
+          echo "✓ EXE + latest.yml uploaded to https://github.com/$REPO/releases/tag/$TAG"

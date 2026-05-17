@@ -56,19 +56,35 @@ app.whenReady().then(async () => {
     console.error("Engine failed to start:", e);
   }
 
-  // Auto-update: Windows-only for now. The macOS auto-update path needs a
-  // signed/notarized DMG (Apple Developer cert), which we don't have yet —
-  // calling autoUpdater there would just log noisy signature errors. Wire
-  // Mac in later when the cert lands. Skipped in dev (app.isPackaged false).
-  if (app.isPackaged && process.platform === "win32") {
+  // Auto-update: enabled on both macOS and Windows. macOS DMGs are now
+  // notarized + stapled (Developer ID Application cert), so electron-
+  // updater can verify and apply them. Skipped in dev (app.isPackaged
+  // false) since there's no signature to verify.
+  if (app.isPackaged) {
     autoUpdater.logger = {
       info:  (m: any) => _log(`[updater] info: ${m}`),
       warn:  (m: any) => _log(`[updater] warn: ${m}`),
       error: (m: any) => _log(`[updater] error: ${m?.stack ?? m}`),
       debug: (_m: any) => {},
     } as any;
-    autoUpdater.checkForUpdatesAndNotify().catch((e) =>
-      _log(`[updater] checkForUpdatesAndNotify failed: ${e?.stack ?? e}`)
+    // Don't auto-download; let the user opt in via Settings → Check for
+    // updates. autoUpdater still polls on startup so the menu badge can
+    // surface "Update available" without surprise installs.
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = true;
+
+    // Forward lifecycle events to renderers so the Settings UI can show
+    // progress / completion / errors. Listeners attach in ipc.ts.
+    for (const ev of ["checking-for-update", "update-available", "update-not-available", "error", "download-progress", "update-downloaded"] as const) {
+      autoUpdater.on(ev as any, (payload: any) => {
+        for (const w of BrowserWindow.getAllWindows()) {
+          if (!w.isDestroyed()) w.webContents.send("updater:event", { kind: ev, payload });
+        }
+      });
+    }
+
+    autoUpdater.checkForUpdates().catch((e) =>
+      _log(`[updater] startup check failed: ${e?.stack ?? e}`)
     );
   }
 

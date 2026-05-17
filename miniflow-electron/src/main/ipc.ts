@@ -1,6 +1,7 @@
 // Wire IPC handlers that the preload script exposes to the renderer.
 
 import { ipcMain, shell, app } from "electron";
+import { autoUpdater } from "electron-updater";
 
 import { invoke } from "./api";
 import { helper } from "./helper";
@@ -159,4 +160,43 @@ export function registerIpc() {
   ipcMain.handle(EXTRA.getUserStatus, () => invoke("get_user_status", {}));
   ipcMain.handle(EXTRA.getUxieUser,   () => invoke("get_uxie_user", {}));
   ipcMain.handle(EXTRA.logout,        () => invoke("logout_uxie", {}));
+
+  // Auto-updater — called from Settings → "Check for updates".
+  // Lifecycle events are pushed to renderers on the "updater:event"
+  // channel from main/index.ts.
+  ipcMain.handle("updater:check", async () => {
+    if (!app.isPackaged) {
+      return { ok: false, reason: "dev build" };
+    }
+    try {
+      const result = await autoUpdater.checkForUpdates();
+      return {
+        ok: true,
+        current: app.getVersion(),
+        updateInfo: result?.updateInfo
+          ? { version: result.updateInfo.version, releaseDate: result.updateInfo.releaseDate }
+          : null,
+      };
+    } catch (e: any) {
+      return { ok: false, reason: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.handle("updater:download", async () => {
+    try {
+      await autoUpdater.downloadUpdate();
+      return { ok: true };
+    } catch (e: any) {
+      return { ok: false, reason: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.handle("updater:installNow", () => {
+    // Quits the running app and installs the update Electron already
+    // downloaded. macOS swaps the .app, Windows runs the NSIS installer.
+    autoUpdater.quitAndInstall(false, true);
+    return { ok: true };
+  });
+
+  ipcMain.handle("updater:version", () => app.getVersion());
 }
