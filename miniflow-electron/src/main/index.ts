@@ -38,6 +38,7 @@ import { createOverlayWindow } from "./overlayWindow";
 import { onVoiceStart, onVoiceEnd } from "./widgetState";
 import { getFrontmostAppId } from "./platform";
 import { autoUpdater } from "electron-updater";
+import { showMeetingDetectedNotification } from "./meetingNotifications";
 
 // Uxie now ships with a Dock icon (LSUIElement is false in electron-
 // builder.yml). The hideDockIcon call is left out so the Dock entry

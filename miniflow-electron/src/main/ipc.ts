@@ -199,4 +199,21 @@ export function registerIpc() {
   });
 
   ipcMain.handle("updater:version", () => app.getVersion());
+
+  // Meetings (Note Taker tab)
+  ipcMain.handle("meetings:list",      (_e, limit?: number) => invoke("list_meetings", { limit: limit ?? 50 }));
+  ipcMain.handle("meetings:get",       (_e, id: number) => invoke("get_meeting", { id }));
+  ipcMain.handle("meetings:delete",    (_e, id: number) => invoke("delete_meeting", { id }));
+  ipcMain.handle("meetings:deleteAll", () => invoke("delete_all_meetings", {}));
+  ipcMain.handle("meetings:updateNotes", (_e, id: number, notes: string) =>
+    invoke("update_meeting_notes", { id, notes })
+  );
+  ipcMain.handle("meetings:startRecording", (_e, id: number) =>
+    invoke("start_meeting_recording", { id })
+  );
+  ipcMain.handle("meetings:stopRecording", (_e, id: number, transcript?: string) =>
+    invoke("stop_meeting_recording", { id, transcript: transcript ?? "" })
+  );
+  ipcMain.handle("meetings:skip",      (_e, id: number) => invoke("skip_meeting", { id }));
+  ipcMain.handle("meetings:structure", (_e, id: number) => invoke("structure_meeting", { id }));
 }

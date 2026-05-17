@@ -160,6 +160,21 @@ const api = {
   // Helper
   requestType:    (text: string) => ipcRenderer.send("helper:type", text),
 
+  // Meetings (Note Taker tab)
+  listMeetings:        (limit?: number) => ipcRenderer.invoke("meetings:list", limit),
+  getMeeting:          (id: number) => ipcRenderer.invoke("meetings:get", id),
+  deleteMeeting:       (id: number) => ipcRenderer.invoke("meetings:delete", id),
+  deleteAllMeetings:   () => ipcRenderer.invoke("meetings:deleteAll"),
+  updateMeetingNotes:  (id: number, notes: string) => ipcRenderer.invoke("meetings:updateNotes", id, notes),
+  startMeetingRecording: (id: number) => ipcRenderer.invoke("meetings:startRecording", id),
+  stopMeetingRecording:  (id: number, transcript?: string) =>
+    ipcRenderer.invoke("meetings:stopRecording", id, transcript),
+  skipMeeting:         (id: number) => ipcRenderer.invoke("meetings:skip", id),
+  structureMeeting:    (id: number) => ipcRenderer.invoke("meetings:structure", id),
+  onMeetingDetected:   (cb: (m: any) => void) => listen("meeting:detected", cb),
+  onMeetingsRefresh:   (cb: () => void) => listen("meetings:refresh", () => cb()),
+  onMeetingsReveal:    (cb: () => void) => listen("meetings:reveal", () => cb()),
+
   // Dictionary (word → replacement)
   getDictionary:      () => ipcRenderer.invoke("dict:get"),
   addDictWord:        (from: string, to: string) => ipcRenderer.invoke("dict:add", from, to),

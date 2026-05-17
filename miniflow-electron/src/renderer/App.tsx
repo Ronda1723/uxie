@@ -3,11 +3,12 @@ import { Sidebar } from "./components/Sidebar";
 import { HomeTab } from "./components/HomeTab";
 import { DictionaryTab } from "./components/DictionaryTab";
 import { SnippetsTab } from "./components/SnippetsTab";
+import { MeetingsTab } from "./components/MeetingsTab";
 import { SettingsModal } from "./components/SettingsModal";
 import { Onboarding } from "./components/Onboarding";
 import { useAudioCapture } from "./audio";
 
-export type SidebarTab = "home" | "dictionary" | "snippets";
+export type SidebarTab = "home" | "meetings" | "dictionary" | "snippets";
 
 export function App() {
   const [tab, setTab] = useState<SidebarTab>("home");
@@ -44,7 +45,11 @@ export function App() {
         window.miniflow.requestType(a.message);
       }
     });
-    return () => { offStatus(); offAct(); };
+    // Clicking the meeting notification flips us to the Meetings tab.
+    const offReveal = (window.miniflow as any).onMeetingsReveal?.(() =>
+      setTab("meetings")
+    );
+    return () => { offStatus(); offAct(); offReveal?.(); };
   }, []);
 
   function closeOnboarding() {
@@ -76,6 +81,7 @@ export function App() {
               captureMode={captureMode}
             />
           )}
+          {tab === "meetings"   && <MeetingsTab />}
           {tab === "dictionary" && <DictionaryTab />}
           {tab === "snippets"   && <SnippetsTab />}
         </div>

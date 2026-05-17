@@ -63,10 +63,14 @@ build_backend.sh           PyInstaller-only build
 - `miniflow-engine/agent.py` — LLM agent loop, grammar correction
 - `miniflow-engine/llm.py` — LLM provider abstraction (uxie = Railway proxy)
 - `miniflow-engine/config.py` — config + JWT storage, default provider = "uxie"
+- `miniflow-engine/meetings.py` — Note Taker: calendar poll loop + SQLite at `~/miniflow/meetings.db` + structure-meeting client (Slice 1; audio tap pending)
 - `miniflow-engine/normalize.py` — email/URL spoken-word normalization
 - `miniflow-electron/src/main/overlayWindow.ts` — floating approval overlay
+- `miniflow-electron/src/main/meetingNotifications.ts` — native macOS notification with Record/Skip actions, fires on `meeting:detected` WS event
 - `miniflow-electron/src/renderer/components/OverlayWidget.tsx` — overlay UI
-- `uxie-backend/proxy.py` — `/llm/stream`, `/llm/chat`, `/stt/session` endpoints
+- `miniflow-electron/src/renderer/components/MeetingsTab.tsx` — Meetings (Note Taker) tab — list + detail, live notes, Structure-this-meeting
+- `uxie-backend/proxy.py` — `/llm/stream`, `/llm/chat`, `/llm/structure-meeting`, `/stt/session` endpoints
+- `uxie-backend/limits.py` — monthly counters AND in-memory per-hour/day burst limiter (`check_burst`) for expensive endpoints
 - `uxie-backend/auth.py` — OTP send/verify, JWT issue
 
 ## Google OAuth credentials

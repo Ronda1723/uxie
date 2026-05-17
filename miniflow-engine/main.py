@@ -60,6 +60,7 @@ import oauth
 import llm as llm_module
 import hotkey as hotkey_module
 import mcp_client
+import meetings
 from connectors import registry
 
 import pathlib
@@ -107,6 +108,7 @@ async def lifespan(app: FastAPI):
     audio.set_event_broadcaster(manager.broadcast)
     dictation.set_event_broadcaster(manager.broadcast)
     agent.set_event_broadcaster(manager.broadcast)
+    meetings.set_event_emitter(manager.broadcast)
     # Start MCP servers (Playwright always-on + any with saved credentials)
     asyncio.create_task(mcp_client.start())
     # Warm up litellm in the background so the first real LLM call doesn't
@@ -116,8 +118,16 @@ async def lifespan(app: FastAPI):
     # eat the 300–800ms /stt/session round-trip (which was dropping the
     # first word of an utterance).
     asyncio.create_task(audio.prewarm_deepgram_key())
+    # Calendar → meeting detection. Runs forever; cancellation is handled
+    # by the surrounding lifespan teardown.
+    meetings_task = asyncio.create_task(meetings.start_poll_loop())
     yield
     log.info("MiniFlow engine shutting down")
+    meetings_task.cancel()
+    try:
+        await meetings_task
+    except (asyncio.CancelledError, Exception):
+        pass
     await mcp_client.stop()
 
 
@@ -575,6 +585,18 @@ async def invoke(command: str, body: dict = {}):
         "mcp_get_status":        lambda b: mcp_client.get_server_status(),
         "mcp_connect_server":    lambda b: _mcp_connect_server(b["server_id"], b.get("credentials", {})),
         "mcp_disconnect_server": lambda b: _mcp_disconnect_server(b["server_id"]),
+        # Meetings (Note Taker tab)
+        "list_meetings":         lambda b: meetings.list_meetings(int(b.get("limit", 50))),
+        "get_meeting":           lambda b: meetings.get_meeting(int(b["id"])),
+        "delete_meeting":        lambda b: meetings.delete_meeting(int(b["id"])),
+        "delete_all_meetings":   lambda b: meetings.delete_all_meetings(),
+        "update_meeting_notes":  lambda b: meetings.update_user_notes(int(b["id"]), b.get("notes", "")),
+        "start_meeting_recording": lambda b: meetings.mark_recording_started(int(b["id"])),
+        "stop_meeting_recording":  lambda b: meetings.mark_recording_ended(
+            int(b["id"]), b.get("transcript", "")
+        ),
+        "skip_meeting":          lambda b: meetings.mark_skipped(int(b["id"])),
+        "structure_meeting":     lambda b: meetings.structure_meeting(int(b["id"])),
         # App
         "open_settings":         lambda b: None,
     }

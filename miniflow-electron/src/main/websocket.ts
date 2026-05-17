@@ -15,6 +15,7 @@ import {
   onApprovalNeeded,
   onApprovalResolved,
 } from "./widgetState";
+import { showMeetingDetectedNotification } from "./meetingNotifications";
 
 let ws: WebSocket | null = null;
 let getWindows: (() => BrowserWindow[]) = () => [];
@@ -54,6 +55,16 @@ export function connectWs(): void {
     // Drive the floating widget state machine. setMode handles show/hide
     // for us — no direct overlay calls from this file anymore.
     routeToWidgetState(msg.event, msg.payload);
+
+    // Meeting detection fires a native macOS Notification — the user sees
+    // it even when Uxie is in the background, which is the whole point.
+    if (msg.event === "meeting:detected") {
+      try {
+        showMeetingDetectedNotification(msg.payload as any);
+      } catch (e) {
+        console.error("[meeting] notification failed:", e);
+      }
+    }
 
     forwardToRenderer(msg.event, msg.payload);
   });
@@ -107,6 +118,7 @@ function forwardToRenderer(event: string, payload: unknown): void {
     event === "debug"               ? "debug:event" :
     event === "approval-needed"     ? "agent:approval-needed" :
     event === "approval-resolved"   ? "agent:approval-resolved" :
+    event === "meeting:detected"    ? "meeting:detected" :
     null;
   if (!channel) return;
   // Broadcast to every live BrowserWindow exactly ONCE. We used to also loop
