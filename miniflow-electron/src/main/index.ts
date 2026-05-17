@@ -36,12 +36,12 @@ import { invoke } from "./api";
 import { IpcChannels } from "../shared/types";
 import { createOverlayWindow } from "./overlayWindow";
 import { onVoiceStart, onVoiceEnd } from "./widgetState";
-import { getFrontmostAppId, hideDockIcon } from "./platform";
+import { getFrontmostAppId } from "./platform";
 import { autoUpdater } from "electron-updater";
 
-// Hide from dock on macOS (no-op on Windows). LSUIElement in Info.plist
-// also enforces this on macOS.
-hideDockIcon(app);
+// Uxie now ships with a Dock icon (LSUIElement is false in electron-
+// builder.yml). The hideDockIcon call is left out so the Dock entry
+// is present on launch.
 
 // Single instance lock
 if (!app.requestSingleInstanceLock()) {
@@ -169,8 +169,18 @@ function broadcast(channel: string, payload: unknown) {
 }
 
 app.on("window-all-closed", () => {
-  // Intentionally do nothing — we live in the menu bar and should keep running
-  // even if the popover window is closed.
+  // Don't quit on last window close — Uxie has a Dock icon + a tray icon
+  // and is expected to keep running. Clicking the Dock re-opens (see
+  // app.on("activate")); clicking the tray also re-opens the popover.
+});
+
+app.on("activate", () => {
+  // Standard macOS pattern: dock-click re-opens / focuses the main window.
+  const w = popoverWindow();
+  if (w && !w.isDestroyed()) {
+    if (!w.isVisible()) w.show();
+    w.focus();
+  }
 });
 
 app.on("before-quit", () => {

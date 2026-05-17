@@ -93,13 +93,10 @@ function createPopover(): BrowserWindow {
       win.webContents.toggleDevTools();
     }
   });
-  win.on("blur", () => {
-    // Keep open while the renderer has "pinned" the window (onboarding modal,
-    // key input focus, etc) or MINIFLOW_KEEP_OPEN=1 is set in the env.
-    if (process.env.MINIFLOW_KEEP_OPEN === "1") return;
-    if (popoverPinned) return;
-    win.hide();
-  });
+  // No auto-hide on blur — Uxie is now a regular Dock app, the window
+  // stays open until the user minimises or closes it. Closing the
+  // window keeps the app running (see window-all-closed in index.ts);
+  // clicking the Dock icon re-opens it via app.on("activate").
   return win;
 }
 

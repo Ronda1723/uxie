@@ -48,7 +48,9 @@ mac:
   extendInfo:
     NSMicrophoneUsageDescription: "Uxie needs microphone access for voice commands."
     NSAccessibilityUsageDescription: "Uxie types dictated text into the focused app."
-    LSUIElement: true # menu-bar only, no dock icon
+    # LSUIElement: false → Uxie shows in the Dock like a normal Mac app,
+    # the tray icon also stays as a secondary entry point.
+    LSUIElement: false
   extraResources:
     - from: ../native-helper/target/release/miniflow-fn-helper
       to: miniflow-fn-helper
