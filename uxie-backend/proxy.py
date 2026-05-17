@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import current_user
 from db import SessionLog, User, get_db
-from limits import check_and_increment
+from limits import check_and_increment, check_burst
 from settings import get_settings
 import usage
 
@@ -308,6 +308,143 @@ async def llm_chat(
         duration_ms=duration_ms,
     )
     return data
+
+
+# ── Structure meeting (Granola-style summary from transcript + notes) ────────
+
+
+_MEETING_SYSTEM_PROMPT = """You are a meeting-notes assistant. The user is going to give you a
+raw conversation transcript and optionally their own rough notes typed during
+the meeting. Your job:
+
+1. Use the user's rough notes (if any) as a ROADMAP — anchor your output to
+   the topics, decisions and action items they flagged. Don't drop their
+   bullet points; expand them with context from the transcript.
+2. Produce clean, scannable Markdown with these sections in this order:
+
+   ## TL;DR
+   2-4 bullets — the meeting in 30 seconds.
+
+   ## Decisions
+   Each decision on one line, prefixed with `- `. Skip the section if none.
+
+   ## Action items
+   `- [ ] <owner>: <task>` — one line each. Use "@me" if owner is unclear
+   but the speaker took it on. Skip the section if none.
+
+   ## Discussion notes
+   Topic-organized paragraphs covering the substance. Quote a name + short
+   line if a specific person made a notable point.
+
+   ## Open questions
+   Bullets — anything raised but not resolved. Skip if none.
+
+3. Never hallucinate. If the transcript is sparse or unclear, say so in
+   the TL;DR rather than inventing structure.
+4. Strip filler ("um", "uh", "you know"), but preserve substance.
+5. Output PLAIN markdown — no preamble, no "Sure, here's the summary".
+"""
+
+
+class StructureMeetingRequest(BaseModel):
+    transcript: str
+    user_notes: str = ""
+    title: str = ""
+    model: str = "gpt-4o"
+    # Per-meeting client UUID for log correlation; same shape as session_id.
+    session_id: str | None = None
+
+
+# Server-side input caps. Each token ≈ 4 chars for English; 200k chars is
+# roughly 50k tokens which is well within gpt-4o's window AND keeps the worst-
+# case cost per call bounded.
+_MAX_TRANSCRIPT_CHARS = 200_000
+_MAX_NOTES_CHARS = 20_000
+_MAX_TITLE_CHARS = 200
+
+
+async def llm_structure_meeting(
+    body: StructureMeetingRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    """Turn a raw transcript + the user's typed notes into a Granola-style
+    structured summary. Counted under the monthly `command` quota AND a per-
+    hour/day burst bucket (defence-in-depth)."""
+    # Burst limit FIRST so monthly counter isn't consumed when rejecting.
+    check_burst(
+        user.id,
+        "structure_meeting",
+        per_hour=_settings.burst_structure_meeting_per_hour,
+        per_day=_settings.burst_structure_meeting_per_day,
+    )
+    await check_and_increment(db, user, "command")
+
+    transcript = (body.transcript or "")[:_MAX_TRANSCRIPT_CHARS]
+    notes = (body.user_notes or "")[:_MAX_NOTES_CHARS]
+    title = (body.title or "")[:_MAX_TITLE_CHARS]
+
+    if not transcript.strip():
+        raise HTTPException(400, "transcript is empty")
+
+    user_msg_parts = []
+    if title:
+        user_msg_parts.append(f"# Meeting: {title}\n")
+    if notes.strip():
+        user_msg_parts.append("## My rough notes (use as roadmap)\n" + notes.strip() + "\n")
+    user_msg_parts.append("## Raw transcript\n" + transcript)
+    user_msg = "\n".join(user_msg_parts)
+
+    payload = {
+        "model": body.model,
+        "messages": [
+            {"role": "system", "content": _MEETING_SYSTEM_PROMPT},
+            {"role": "user",   "content": user_msg},
+        ],
+        "temperature": 0.2,
+    }
+
+    base_url, api_key = _llm_base_and_key("openai")
+    client = get_http()
+    import time as _time
+    t0 = _time.perf_counter()
+    resp = await client.post(
+        f"{base_url}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    duration_ms = int((_time.perf_counter() - t0) * 1000)
+
+    u = data.get("usage") or {}
+    await usage.record_llm_usage(
+        db,
+        user_id=user.id,
+        provider="openai",
+        model=body.model,
+        action="command",
+        prompt_tokens=int(u.get("prompt_tokens", 0) or 0),
+        completion_tokens=int(u.get("completion_tokens", 0) or 0),
+        duration_ms=duration_ms,
+    )
+
+    structured = ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "")
+    # Truncated input goes to the session log; transcripts themselves aren't
+    # logged so we keep the privacy story clean ("listens, writes, forgets").
+    await _record_session(
+        db,
+        user_id=user.id,
+        session_id=body.session_id,
+        action="command",
+        provider="openai",
+        model=body.model,
+        input_text=f"[structure_meeting] title={title} transcript_chars={len(transcript)} notes_chars={len(notes)}",
+        output_text=structured,
+        duration_ms=duration_ms,
+    )
+
+    return {"structured": structured, "model": body.model}
 
 
 # ── STT session token ─────────────────────────────────────────────────────────

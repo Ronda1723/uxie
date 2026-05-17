@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     pro_command_limit: int = 500
     trial_days: int = 30              # new users get 30 free days (full Pro)
 
+    # Per-user burst limits (in-memory token bucket; resets on process restart).
+    # Belt-and-braces on top of monthly counters — defends against a stolen JWT
+    # being used to spam expensive endpoints in a single night.
+    burst_structure_meeting_per_hour: int = 20
+    burst_structure_meeting_per_day: int = 50
+
     # Comma-separated list of emails allowed to view /admin/* pages.
     admin_emails: str = ""
 

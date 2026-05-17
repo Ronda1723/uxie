@@ -10,10 +10,17 @@ Pro tier:
   - 500 commands / month
 
 During free_days_remaining > 0: full Pro limits apply (trial period).
+
+In addition to the monthly counters above, expensive endpoints use the
+`check_burst()` helper below for an in-memory per-hour + per-day token
+bucket. This is defence-in-depth against a stolen JWT being used to burn
+the bill in a single night.
 """
 
 from __future__ import annotations
 
+import time
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
@@ -24,6 +31,47 @@ from db import Usage, User
 from settings import get_settings
 
 _settings = get_settings()
+
+
+# ── In-memory burst limiter (per-process; resets on restart) ──────────────────
+# Maps (bucket_key, user_id) → deque of recent call timestamps. We trim and
+# count in a single pass on every call. Sliding window, not fixed bucket, so
+# users can't game the boundary by stacking calls right before/after the hour.
+
+_burst: dict[tuple[str, int], deque[float]] = defaultdict(deque)
+
+
+def check_burst(
+    user_id: int,
+    bucket: str,
+    *,
+    per_hour: int,
+    per_day: int,
+) -> None:
+    """Raise 429 if `user_id` exceeded their per-hour or per-day quota for
+    `bucket`. Trims expired timestamps in place so memory stays bounded."""
+    now = time.time()
+    hour_cutoff = now - 3600
+    day_cutoff = now - 86400
+
+    q = _burst[(bucket, user_id)]
+    # Drop anything older than 24h.
+    while q and q[0] < day_cutoff:
+        q.popleft()
+
+    # Count items inside the 1h window.
+    recent_hour = sum(1 for t in q if t >= hour_cutoff)
+    if recent_hour >= per_hour:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit: max {per_hour} {bucket} requests/hour.",
+        )
+    if len(q) >= per_day:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit: max {per_day} {bucket} requests/day.",
+        )
+    q.append(now)
 
 
 def _current_month() -> str:
