@@ -61,10 +61,45 @@ else
   ls -la "$HELPER_DIR/target/release/miniflow-fn-helper"* 2>/dev/null | tail -1
 fi
 
-# The Swift audio-tap (native-helper/audio-tap/) is in tree but not
-# shipped yet — AVAudioEngine in CLI context delivers only one buffer
-# per session. Revisit when we have time to debug inside the .app
-# bundle.
+# ── Step 2b: Swift audio-tap (Mac only) ───────────────────────────────────────
+# AVCaptureSession + ScreenCaptureKit sidecar. Built into a tiny .app
+# sub-bundle (Info.plist inside) so TCC recognises its usage descriptions
+# and AVCapture actually delivers buffers (CLI-only binaries silently
+# fail). Bundled into Uxie.app via electron-builder mac.extraResources.
+#
+# Skip via SKIP_AUDIO_TAP=1.
+
+if [ "${SKIP_AUDIO_TAP:-0}" = "1" ]; then
+  echo "→ Skipping Swift audio-tap build (SKIP_AUDIO_TAP=1)"
+else
+  case "$(uname -s)" in
+    Darwin)
+      echo ""
+      echo "━━━ Step 2b: Swift audio-tap ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      AUDIO_TAP_DIR="$SCRIPT_DIR/native-helper/audio-tap"
+      if ! command -v swift &>/dev/null; then
+        echo "✗ swift command not found — install Xcode command line tools" >&2
+        exit 1
+      fi
+      (cd "$AUDIO_TAP_DIR" && swift build -c release)
+
+      # Assemble the .app sub-bundle around the raw binary so TCC sees a
+      # proper Info.plist with our usage descriptions.
+      APP_BUNDLE="$AUDIO_TAP_DIR/.build/release/UxieAudioTap.app"
+      rm -rf "$APP_BUNDLE"
+      mkdir -p "$APP_BUNDLE/Contents/MacOS"
+      cp "$AUDIO_TAP_DIR/.build/release/uxie-audio-tap" \
+         "$APP_BUNDLE/Contents/MacOS/uxie-audio-tap"
+      cp "$AUDIO_TAP_DIR/Resources/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
+      ls -la "$APP_BUNDLE/Contents/" "$APP_BUNDLE/Contents/MacOS/"
+      ;;
+    *)
+      # Windows / Linux don't ship the audio tap. The meeting flow falls
+      # back to "no audio capture" (Slice 1 status-only flow).
+      echo "→ Skipping Swift audio-tap (non-macOS host)"
+      ;;
+  esac
+fi
 
 # ── Step 3: Electron TypeScript + Vite ────────────────────────────────────────
 

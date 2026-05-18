@@ -48,12 +48,21 @@ mac:
   extendInfo:
     NSMicrophoneUsageDescription: "Uxie needs microphone access for voice commands and meeting recording."
     NSAccessibilityUsageDescription: "Uxie types dictated text into the focused app."
+    # Meeting recording uses ScreenCaptureKit for system audio (other
+    # participants on Zoom/Meet/Teams) — TCC gates that behind Screen
+    # Recording permission and shows this string in the consent dialog.
+    NSScreenCaptureDescription: "Uxie captures system audio (other participants' voices on Zoom, Meet, Teams) to transcribe meetings — no video is recorded."
     # LSUIElement: false → Uxie shows in the Dock like a normal Mac app,
     # the tray icon also stays as a secondary entry point.
     LSUIElement: false
   extraResources:
     - from: ../native-helper/target/release/miniflow-fn-helper
       to: miniflow-fn-helper
+    # Swift sidecar bundle for meeting audio capture (AVCaptureSession +
+    # ScreenCaptureKit). Built by build_electron.sh's Step 2b.
+    - from: ../native-helper/audio-tap/.build/release/UxieAudioTap.app
+      to: UxieAudioTap.app
+      filter: ["**/*"]
 
 win:
   target:

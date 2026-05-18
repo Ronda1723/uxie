@@ -46,13 +46,6 @@ _chunk_queue: list[bytes] = []         # buffers chunks received before socket c
 _connecting: bool = False
 _captured_pcm: bytearray = bytearray() # full-session audio for admin debugging upload
 
-# Meeting mode — when set, finalized Deepgram chunks get appended to this
-# meeting's transcript instead of being collected for LLM dispatch.
-_meeting_id: int | None = None
-_meeting_ws = None
-_meeting_recv_task: asyncio.Task | None = None
-_meeting_keepalive_task: asyncio.Task | None = None
-
 
 def set_event_broadcaster(fn: Callable):
     global _broadcaster
@@ -241,15 +234,6 @@ async def send_audio_chunk(chunk: str):
     # Always tap a copy for admin audio debugging. This is a no-op when R2
     # isn't configured on the backend (upload is skipped at session end).
     _captured_pcm.extend(decoded)
-    # During a meeting we fan out to BOTH the dictation socket (if a
-    # hotkey press happens to overlap) and the meeting socket. In
-    # practice users won't hotkey-dictate during a meeting, but the
-    # routing being independent keeps each path simple.
-    if _meeting_ws is not None:
-        try:
-            await _meeting_ws.send(decoded)
-        except Exception as e:
-            log.warning(f"send_audio_chunk (meeting): {e}")
     if _connecting:
         _chunk_queue.append(decoded)
         return
@@ -412,153 +396,6 @@ async def _receive_transcripts():
         log.error(f"Deepgram receive error: {e}")
         if _last_seen_received:
             _last_seen_received.set()
-
-
-# ── Meeting (long-form) capture ───────────────────────────────────────────────
-# Reuses the renderer's existing mic capture path. The renderer fires
-# `voice:chunk` IPC for every 100ms PCM chunk; send_audio_chunk above
-# fans those out to the meeting WebSocket when one is open. Finalized
-# transcripts get appended to the meeting's row in SQLite.
-
-
-async def start_meeting_listening(meeting_id: int) -> dict:
-    """Open a long-form Deepgram socket for a meeting. Idempotent —
-    calling while another meeting is recording stops it first."""
-    global _meeting_id, _meeting_ws, _meeting_recv_task, _meeting_keepalive_task
-
-    if _meeting_ws is not None:
-        await stop_meeting_listening()
-
-    key = await _get_deepgram_key()
-    if not key:
-        return {"error": "Not signed in — connect Uxie account first"}
-
-    # diarize=true → speaker labels (Speaker 0/1/…) for multi-party calls.
-    # smart_format + punctuate → readable output for the structure pass.
-    # interim_results=false → we only persist finals (cheaper, simpler).
-    # No endpointing close — the user explicitly clicks Stop.
-    url = (
-        f"wss://api.deepgram.com/v1/listen"
-        f"?model=nova-3"
-        f"&encoding=linear16&sample_rate=16000&channels=1&language=en-US"
-        f"&punctuate=true&smart_format=true&diarize=true"
-        f"&interim_results=false"
-    )
-    try:
-        _meeting_ws = await websockets.connect(
-            url,
-            extra_headers={"Authorization": f"Token {key}"},
-            ssl=_SSL_CTX,
-            ping_interval=20,
-            ping_timeout=20,
-            close_timeout=5,
-        )
-    except Exception as e:
-        log.error(f"start_meeting_listening: Deepgram connect failed: {e}")
-        _meeting_ws = None
-        return {"error": f"deepgram connect failed: {e}"}
-
-    _meeting_id = int(meeting_id)
-    _meeting_recv_task = asyncio.create_task(_meeting_receive())
-    _meeting_keepalive_task = asyncio.create_task(_meeting_keepalive())
-    log.info(f"meeting recording: started for meeting_id={meeting_id}")
-    return {"ok": True}
-
-
-async def stop_meeting_listening() -> dict:
-    """Close the meeting Deepgram socket and flush its tail. Safe to call
-    when no meeting session is active."""
-    global _meeting_id, _meeting_ws, _meeting_recv_task, _meeting_keepalive_task
-
-    if _meeting_ws is None:
-        return {"ok": True, "already_stopped": True}
-
-    # Tell Deepgram to flush the final results.
-    try:
-        await _meeting_ws.send(json.dumps({"type": "CloseStream"}))
-    except Exception:
-        pass
-
-    # Give Deepgram up to 1.5s to drain its tail before tearing down.
-    if _meeting_recv_task is not None:
-        try:
-            await asyncio.wait_for(_meeting_recv_task, timeout=1.5)
-        except asyncio.TimeoutError:
-            _meeting_recv_task.cancel()
-        except Exception:
-            pass
-
-    if _meeting_keepalive_task is not None:
-        _meeting_keepalive_task.cancel()
-
-    try:
-        await _meeting_ws.close()
-    except Exception:
-        pass
-
-    log.info(f"meeting recording: stopped for meeting_id={_meeting_id}")
-    _meeting_id = None
-    _meeting_ws = None
-    _meeting_recv_task = None
-    _meeting_keepalive_task = None
-    return {"ok": True}
-
-
-def meeting_is_active() -> bool:
-    return _meeting_ws is not None
-
-
-async def _meeting_receive() -> None:
-    """Drain Deepgram messages. Each is_final transcript gets appended to
-    the current meeting row + broadcast as `meeting:transcript-update`."""
-    ws = _meeting_ws
-    meeting_id = _meeting_id
-    if ws is None or meeting_id is None:
-        return
-    try:
-        async for msg in ws:
-            if _meeting_ws is None:  # stopped concurrently
-                return
-            try:
-                data = json.loads(msg)
-            except Exception:
-                continue
-            if data.get("type") != "Results":
-                continue
-            if not data.get("is_final"):
-                continue
-            alts = data.get("channel", {}).get("alternatives", [{}])
-            transcript = (alts[0].get("transcript") or "").strip()
-            if not transcript:
-                continue
-            try:
-                import meetings as _meetings  # deferred to dodge import cycles
-                appended = _meetings.append_transcript_chunk(meeting_id, transcript)
-                await _emit("meeting:transcript-update", appended)
-            except Exception as e:
-                log.warning(f"meeting append_transcript_chunk failed: {e}")
-    except websockets.exceptions.ConnectionClosed:
-        return
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        log.warning(f"_meeting_receive error: {e}")
-
-
-async def _meeting_keepalive() -> None:
-    """Send Deepgram KeepAlive every 5s so silent stretches (everyone on
-    mute, breakout rooms) don't time the socket out."""
-    try:
-        while _meeting_ws is not None:
-            await asyncio.sleep(5.0)
-            if _meeting_ws is None:
-                return
-            try:
-                await _meeting_ws.send(json.dumps({"type": "KeepAlive"}))
-            except Exception:
-                return
-    except asyncio.CancelledError:
-        return
 
 
 def _consolidate_fragments(fragments: list[str]) -> str:

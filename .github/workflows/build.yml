@@ -59,6 +59,22 @@ jobs:
         run: cargo build --release -p helper-mac
         working-directory: native-helper
 
+      - name: Build Swift audio-tap + assemble UxieAudioTap.app sub-bundle
+        # AVCaptureSession + ScreenCaptureKit sidecar. The .app wrapper is
+        # mandatory: TCC silently rejects mic / screen-recording access for
+        # raw CLI binaries because there's no Info.plist for it to read the
+        # NS*UsageDescription strings from.
+        run: |
+          set -euo pipefail
+          swift build -c release
+          APP=".build/release/UxieAudioTap.app"
+          rm -rf "$APP"
+          mkdir -p "$APP/Contents/MacOS"
+          cp ".build/release/uxie-audio-tap" "$APP/Contents/MacOS/uxie-audio-tap"
+          cp "Resources/Info.plist" "$APP/Contents/Info.plist"
+          ls -la "$APP/Contents/" "$APP/Contents/MacOS/"
+        working-directory: native-helper/audio-tap
+
       - name: Install electron deps
         run: npm ci
         working-directory: miniflow-electron
@@ -187,6 +203,15 @@ jobs:
                     --sign "$IDENTITY" --entitlements "$ENT" "$f"
                 fi
               done
+
+          # UxieAudioTap.app is a sub-bundle (.app inside .app). Its inner
+          # Mach-O got signed by the loop above; now seal the sub-bundle
+          # envelope before the top-level re-seal rolls everything up.
+          SUB_APP="$APP/Contents/Resources/UxieAudioTap.app"
+          if [ -d "$SUB_APP" ]; then
+            codesign --force --options runtime --timestamp \
+              --sign "$IDENTITY" --entitlements "$ENT" "$SUB_APP"
+          fi
 
           # Re-seal the .app at the top so the inner signatures get sealed
           # in. NOT using --deep on purpose (Apple discourages it).

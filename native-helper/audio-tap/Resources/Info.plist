@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>          <string>ai.uxie.audio-tap</string>
+  <key>CFBundleName</key>                <string>UxieAudioTap</string>
+  <key>CFBundleDisplayName</key>         <string>Uxie Meeting Recorder</string>
+  <key>CFBundleExecutable</key>          <string>uxie-audio-tap</string>
+  <key>CFBundlePackageType</key>         <string>APPL</string>
+  <key>CFBundleVersion</key>             <string>1</string>
+  <key>CFBundleShortVersionString</key>  <string>1.0</string>
+  <key>LSMinimumSystemVersion</key>      <string>13.0</string>
+  <!-- LSUIElement=true → no Dock icon, no menu bar. This is a headless
+       audio capture helper that runs as a child of the Uxie engine. -->
+  <key>LSUIElement</key>                 <true/>
+  <key>NSMicrophoneUsageDescription</key>
+    <string>Uxie records your voice during meetings to produce a transcript. Audio is discarded after transcription; only the text is kept.</string>
+  <key>NSScreenCaptureDescription</key>
+    <string>Uxie captures system audio (other participants' voices on Zoom, Meet, Teams) to transcribe meetings. No video is recorded.</string>
+</dict>
+</plist>

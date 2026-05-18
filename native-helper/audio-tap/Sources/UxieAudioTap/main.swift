@@ -104,9 +104,14 @@ final class Resampler {
 
     /// Convert `inBuf` (any rate/channels) → mono Float32 @ 16 kHz.
     /// Returns nil if conversion errored.
+    ///
+    /// IMPORTANT: we signal `.noDataNow` (NOT `.endOfStream`) after handing
+    /// the single buffer to the converter. AVAudioConverter treats
+    /// `.endOfStream` as "this stream is finished forever" — once seen, it
+    /// refuses to accept further input on subsequent `convert()` calls.
+    /// `.noDataNow` keeps the converter in streaming mode.
     func convert(_ inBuf: AVAudioPCMBuffer) -> [Float]? {
         let inFrames = inBuf.frameLength
-        // Output capacity scales by ratio of sample rates; pad a little.
         let ratio = outFormat.sampleRate / inBuf.format.sampleRate
         let outCapacity = AVAudioFrameCount(Double(inFrames) * ratio + 64)
         guard let outBuf = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: outCapacity) else {
@@ -116,7 +121,7 @@ final class Resampler {
         var supplied = false
         let status = converter.convert(to: outBuf, error: &error) { _, outStatus in
             if supplied {
-                outStatus.pointee = .endOfStream
+                outStatus.pointee = .noDataNow
                 return nil
             }
             supplied = true
@@ -135,40 +140,126 @@ final class Resampler {
 }
 
 // MARK: - Mic capture
+//
+// AVCaptureSession path. We tried AVAudioEngine first; it only delivered one
+// buffer per session when running outside an NSApplication context. AVCapture
+// is the canonical idiom for long-form streaming audio capture in macOS CLI
+// tools and helper binaries — works headlessly as long as TCC mic permission
+// is granted to either this binary or its parent process.
 
-final class MicCapturer {
-    let engine = AVAudioEngine()
+final class MicCapturer: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     let onSamples: ([Float]) -> Void
+    private let session = AVCaptureSession()
     private var resampler: Resampler?
+    private let outputQueue = DispatchQueue(label: "ai.uxie.audio-tap.mic", qos: .userInitiated)
+
+    var rawCallbacks = 0
+    var rawFramesIn = 0
 
     init(onSamples: @escaping ([Float]) -> Void) {
         self.onSamples = onSamples
     }
 
-    var rawCallbacks = 0
-    var rawFramesIn = 0
-
     func start() throws {
-        let input = engine.inputNode
-        let hwFormat = input.outputFormat(forBus: 0)
-        logErr("mic: hw format \(hwFormat)")
-        resampler = try Resampler(inputFormat: hwFormat)
-        input.installTap(onBus: 0, bufferSize: 1024, format: hwFormat) { [weak self] buf, _ in
-            guard let self = self else { return }
-            self.rawCallbacks += 1
-            self.rawFramesIn += Int(buf.frameLength)
-            if let samples = self.resampler?.convert(buf), !samples.isEmpty {
-                self.onSamples(samples)
-            }
+        guard let device = AVCaptureDevice.default(for: .audio) else {
+            throw NSError(domain: "uxie-audio-tap", code: 10,
+                          userInfo: [NSLocalizedDescriptionKey: "no default audio capture device"])
         }
-        engine.prepare()
-        try engine.start()
-        logErr("mic: engine started")
+        let input = try AVCaptureDeviceInput(device: device)
+        if !session.canAddInput(input) {
+            throw NSError(domain: "uxie-audio-tap", code: 11,
+                          userInfo: [NSLocalizedDescriptionKey: "cannot add mic input to session"])
+        }
+        session.addInput(input)
+
+        let output = AVCaptureAudioDataOutput()
+        // 16 kHz mono Float32 at the source — saves a resampling step in
+        // most cases. AVCaptureAudioDataOutput honours these settings on
+        // macOS 13+; older versions may renegotiate.
+        output.audioSettings = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 48_000.0,  // hardware-native; we resample below
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        if !session.canAddOutput(output) {
+            throw NSError(domain: "uxie-audio-tap", code: 12,
+                          userInfo: [NSLocalizedDescriptionKey: "cannot add audio output to session"])
+        }
+        session.addOutput(output)
+        output.setSampleBufferDelegate(self, queue: outputQueue)
+
+        session.startRunning()
+        logErr("mic: AVCaptureSession started (device=\(device.localizedName))")
     }
 
     func stop() {
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        session.stopRunning()
+        for input in session.inputs { session.removeInput(input) }
+        for output in session.outputs { session.removeOutput(output) }
+    }
+
+    // AVCaptureAudioDataOutputSampleBufferDelegate
+    func captureOutput(_ output: AVCaptureOutput,
+                       didOutput sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        rawCallbacks += 1
+        rawFramesIn += Int(CMSampleBufferGetNumSamples(sampleBuffer))
+
+        guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc),
+              let inFormat = AVAudioFormat(streamDescription: asbdPtr) else {
+            return
+        }
+
+        let numFrames = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard numFrames > 0,
+              let pcmBuf = AVAudioPCMBuffer(pcmFormat: inFormat,
+                                            frameCapacity: AVAudioFrameCount(numFrames)) else {
+            return
+        }
+        pcmBuf.frameLength = AVAudioFrameCount(numFrames)
+
+        // Copy CMSampleBuffer data into the AVAudioPCMBuffer so the converter
+        // (which only speaks AVAudioPCMBuffer) can process it.
+        var ablPtr: AudioBufferList = AudioBufferList(
+            mNumberBuffers: 1,
+            mBuffers: AudioBuffer(mNumberChannels: 0, mDataByteSize: 0, mData: nil)
+        )
+        var blockBuffer: CMBlockBuffer?
+        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: &ablPtr,
+            bufferListSize: MemoryLayout<AudioBufferList>.size,
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        guard status == noErr else { return }
+
+        let abl = UnsafeMutableAudioBufferListPointer(&ablPtr)
+        if abl.count == 0 { return }
+        let srcBytes = abl[0].mData
+        let srcSize = Int(abl[0].mDataByteSize)
+        if srcSize > 0, let srcBytes = srcBytes,
+           let dstFloats = pcmBuf.floatChannelData?[0] {
+            memcpy(dstFloats, srcBytes, srcSize)
+        }
+
+        if resampler == nil {
+            do { resampler = try Resampler(inputFormat: inFormat) }
+            catch {
+                logErr("mic: resampler init failed: \(error.localizedDescription)")
+                return
+            }
+        }
+        if let samples = resampler?.convert(pcmBuf), !samples.isEmpty {
+            onSamples(samples)
+        }
     }
 }
 
@@ -317,24 +408,26 @@ final class Tap {
     var sigtermSource: DispatchSourceSignal?
 
     func setUp() async {
-        // Mic — synchronous startup.
+        // Mic is the master clock. Every mic-resampler output triggers
+        // an emit: we take that many samples from the system-audio ring
+        // and mix them in. The output rate equals the mic's real-time
+        // rate (16 kHz), so Deepgram receives audio that matches wall
+        // clock — no "fast-forward" effect.
         mic = MicCapturer { [weak self] samples in
             guard let self = self else { return }
             self.micCallbacks += 1
-            samples.withUnsafeBufferPointer { self.micRing.append($0) }
-            self.drainAndEmit()
+            self.mixAndEmit(micSamples: samples)
         }
         do { try mic?.start() }
         catch {
             logErr("mic start failed: \(error.localizedDescription)")
         }
 
-        // System audio — async startup.
+        // System audio — feeds the sys ring; mic callback drains it.
         sys = SystemCapturer { [weak self] samples in
             guard let self = self else { return }
             self.sysCallbacks += 1
             samples.withUnsafeBufferPointer { self.sysRing.append($0) }
-            self.drainAndEmit()
         }
         do { try await sys?.start() }
         catch {
@@ -383,41 +476,31 @@ final class Tap {
         sigtermSource = sigterm
     }
 
-    /// Called from input-callback queues. Emits as many FRAME_SAMPLES-sized
-    /// chunks as both rings collectively have data for. Pads the lagging
-    /// source with silence so a denied Screen Recording permission doesn't
-    /// stall the whole pipeline.
-    func drainAndEmit() {
-        // Loop in case multiple frames are ready (input bursts).
-        while !stopped {
-            let micCount = micRing.count
-            let sysCount = sysRing.count
-            // Need at least ONE source with a full frame to make progress.
-            if micCount < FRAME_SAMPLES && sysCount < FRAME_SAMPLES { return }
+    /// Driven by every mic-resampler output. Mic samples are passed in
+    /// directly; we drain the same count from the system-audio ring (or
+    /// pad with zero if the system stream isn't flowing yet / was denied).
+    /// Mix sample-by-sample, clip, emit Int16 LE.
+    func mixAndEmit(micSamples: [Float]) {
+        if stopped || micSamples.isEmpty { return }
+        let n = micSamples.count
+        let sysSamples = sysRing.drain(n)
 
-            let micSamples = micRing.drain(FRAME_SAMPLES)
-            let sysSamples = sysRing.drain(FRAME_SAMPLES)
-            if micSamples.isEmpty && sysSamples.isEmpty { return }
-
-            var mixed = [Int16](repeating: 0, count: FRAME_SAMPLES)
-            for i in 0..<FRAME_SAMPLES {
-                let m = i < micSamples.count ? micSamples[i] : 0
-                let s = i < sysSamples.count ? sysSamples[i] : 0
-                // Sum then clip — with both sources at unit gain the worst
-                // case is 2.0; clamp before Int16 to avoid wrap.
-                var sum = m + s
-                if sum >  1.0 { sum =  1.0 }
-                if sum < -1.0 { sum = -1.0 }
-                mixed[i] = Int16(sum * 32767.0)
-            }
-
-            let data = mixed.withUnsafeBufferPointer { Data(buffer: $0) }
-            stdoutLock.lock()
-            FileHandle.standardOutput.write(data)
-            framesEmitted += 1
-            bytesEmitted += data.count
-            stdoutLock.unlock()
+        var mixed = [Int16](repeating: 0, count: n)
+        for i in 0..<n {
+            let m = micSamples[i]
+            let s = i < sysSamples.count ? sysSamples[i] : 0
+            var sum = m + s
+            if sum >  1.0 { sum =  1.0 }
+            if sum < -1.0 { sum = -1.0 }
+            mixed[i] = Int16(sum * 32767.0)
         }
+
+        let data = mixed.withUnsafeBufferPointer { Data(buffer: $0) }
+        stdoutLock.lock()
+        FileHandle.standardOutput.write(data)
+        framesEmitted += 1
+        bytesEmitted += data.count
+        stdoutLock.unlock()
     }
 
     func shutdown() {
