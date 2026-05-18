@@ -62,6 +62,7 @@ import hotkey as hotkey_module
 import mcp_client
 import meetings
 import audio_meeting
+import meeting_watcher
 from connectors import registry
 
 import pathlib
@@ -111,6 +112,7 @@ async def lifespan(app: FastAPI):
     agent.set_event_broadcaster(manager.broadcast)
     meetings.set_event_emitter(manager.broadcast)
     audio_meeting.set_event_emitter(manager.broadcast)
+    meeting_watcher.set_event_emitter(manager.broadcast)
     # Start MCP servers (Playwright always-on + any with saved credentials)
     asyncio.create_task(mcp_client.start())
     # Warm up litellm in the background so the first real LLM call doesn't
@@ -123,6 +125,11 @@ async def lifespan(app: FastAPI):
     # Calendar → meeting detection. Runs forever; cancellation is handled
     # by the surrounding lifespan teardown.
     meetings_task = asyncio.create_task(meetings.start_poll_loop())
+    # Slack-huddle / Zoom / Teams / Meet auto-detection. Only runs if the
+    # user has explicitly enabled it (default off) since it needs Screen
+    # Recording permission for the watcher subprocess.
+    if config.get_auto_detect_meetings():
+        asyncio.create_task(meeting_watcher.start())
     yield
     log.info("MiniFlow engine shutting down")
     meetings_task.cancel()
@@ -130,6 +137,7 @@ async def lifespan(app: FastAPI):
         await meetings_task
     except (asyncio.CancelledError, Exception):
         pass
+    await meeting_watcher.stop()
     await mcp_client.stop()
 
 
@@ -495,6 +503,17 @@ async def _get_user_status():
     return data
 
 
+async def _set_auto_detect_meetings(enabled: bool) -> dict:
+    """Toggle persistent setting AND start/stop the watcher subprocess
+    so the change takes effect immediately."""
+    config.set_auto_detect_meetings(enabled)
+    if enabled:
+        await meeting_watcher.start()
+    else:
+        await meeting_watcher.stop()
+    return {"ok": True, "enabled": enabled}
+
+
 async def _mcp_connect_server(server_id: str, credentials: dict):
     """Save all credentials for a server then restart it."""
     for key, value in credentials.items():
@@ -599,6 +618,8 @@ async def invoke(command: str, body: dict = {}):
         ),
         "skip_meeting":          lambda b: meetings.mark_skipped(int(b["id"])),
         "structure_meeting":     lambda b: meetings.structure_meeting(int(b["id"])),
+        "get_auto_detect_meetings": lambda b: {"enabled": config.get_auto_detect_meetings()},
+        "set_auto_detect_meetings": lambda b: _set_auto_detect_meetings(bool(b.get("enabled", False))),
         # App
         "open_settings":         lambda b: None,
     }

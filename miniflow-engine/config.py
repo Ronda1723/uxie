@@ -158,6 +158,18 @@ def save_advanced_setting(key: str, value: bool):
     _write_settings(s)
 
 
+def get_auto_detect_meetings() -> bool:
+    """When true, the meeting watcher subprocess runs in the background
+    and fires notifications when known meeting-app windows appear."""
+    return bool(_read_settings().get("auto_detect_meetings", False))
+
+
+def set_auto_detect_meetings(enabled: bool) -> None:
+    s = _read_settings()
+    s["auto_detect_meetings"] = bool(enabled)
+    _write_settings(s)
+
+
 def save_user_name(name: str):
     s = _read_settings()
     s["user_name"] = name.strip() or None

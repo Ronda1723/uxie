@@ -514,17 +514,206 @@ final class Tap {
     }
 }
 
-// Start everything, then park the main thread on the dispatch main queue.
-// AVAudioEngine + ScreenCaptureKit deliver buffers via internal queues, but
-// rely on the main thread being available to handle their housekeeping.
+// MARK: - Watcher mode
 //
-// `dispatchMain()` is the canonical CLI-tool answer. Crucial: we spawn
-// setUp() in a *detached* Task so it doesn't make the top-level script a
-// "main task" that the Swift runtime treats as the program's lifetime —
-// if it were the main task, dispatchMain() would be considered the task's
-// continuation and the runtime would exit when it "returned" (which it
-// never does, but the runtime can't tell). Detached Task + dispatchMain
-// keeps the process parked forever.
-let tap = Tap()
-Task.detached { await tap.setUp() }
-dispatchMain()
+// Polls `SCShareableContent` on a long interval and emits JSON events to
+// stdout when a known meeting-app window appears or disappears. The
+// engine's meeting_watcher.py spawns this in a separate process and
+// translates events into native macOS notifications + DB rows.
+//
+// Detected meeting-app patterns:
+//   Slack huddle:    bundleID com.tinyspeck.slackmacgap, title contains "Huddle"
+//   Zoom meeting:    bundleID us.zoom.xos, title starts with "Zoom Meeting"
+//   Teams meeting:   bundleID com.microsoft.teams2 (or com.microsoft.teams), title contains "Meeting"
+//   Meet (Chrome):   bundleID com.google.Chrome, title contains "Meet"
+//   Webex:           bundleID com.cisco.webexmeetingsapp
+//
+// We DO NOT actually capture any audio in watch mode — this is a pure
+// window-presence detector. SCShareableContent does require the parent
+// app to have Screen Recording permission; the .app sub-bundle's
+// NSScreenCaptureDescription handles the TCC consent prompt.
+
+final class Watcher {
+    private var knownActiveIds: Set<String> = []
+    private var stopFlag = false
+    private var sigtermSource: DispatchSourceSignal?
+
+    func emit(_ kind: String, _ payload: [String: Any]) {
+        var event = payload
+        event["event"] = kind
+        guard let data = try? JSONSerialization.data(withJSONObject: event, options: []),
+              let line = String(data: data, encoding: .utf8) else { return }
+        FileHandle.standardOutput.write((line + "\n").data(using: .utf8)!)
+    }
+
+    /// Emit a single event with a leading newline so receivers can dedupe
+    /// partial lines across reads. Receivers should split on newline.
+
+    struct MeetingMatch {
+        let appBundleId: String
+        let appName: String
+        let title: String
+        let detectorKey: String       // stable per-meeting-instance id
+
+        var asDict: [String: Any] {
+            return [
+                "app_bundle_id": appBundleId,
+                "app_name": appName,
+                "title": title,
+                "detector_key": detectorKey,
+            ]
+        }
+    }
+
+    /// Decide whether a given SCWindow looks like an active meeting.
+    /// Returns a MeetingMatch if yes, nil otherwise.
+    func classify(_ w: SCWindow) -> MeetingMatch? {
+        guard let app = w.owningApplication else { return nil }
+        let bundleId = app.bundleIdentifier
+        let appName = app.applicationName
+        let title = (w.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if title.isEmpty { return nil }
+        let lowered = title.lowercased()
+
+        // The detector_key MUST be stable for the lifetime of a single
+        // meeting so we don't fire duplicate notifications. Using
+        // (bundleId, window_id) gives us per-window stability — closing
+        // and reopening a huddle yields a new window id, hence a new
+        // detection.
+        let key = "\(bundleId)#\(w.windowID)"
+
+        switch bundleId {
+        case "com.tinyspeck.slackmacgap":
+            if lowered.contains("huddle") || lowered.contains("slack call") {
+                return MeetingMatch(appBundleId: bundleId, appName: appName,
+                                    title: "Slack: \(title)", detectorKey: key)
+            }
+        case "us.zoom.xos", "us.zoom.ZoomClips":
+            if lowered.hasPrefix("zoom meeting") || lowered.contains("zoom webinar") {
+                return MeetingMatch(appBundleId: bundleId, appName: appName,
+                                    title: title, detectorKey: key)
+            }
+        case "com.microsoft.teams2", "com.microsoft.teams":
+            // Teams main-window title contains "Meeting in progress" or
+            // similar while in a call.
+            if lowered.contains("meeting") || lowered.contains("call with") {
+                return MeetingMatch(appBundleId: bundleId, appName: appName,
+                                    title: "Teams: \(title)", detectorKey: key)
+            }
+        case "com.cisco.webexmeetingsapp", "com.webex.meetingmanager":
+            return MeetingMatch(appBundleId: bundleId, appName: appName,
+                                title: "Webex: \(title)", detectorKey: key)
+        case "com.google.Chrome", "com.google.Chrome.canary",
+             "com.brave.Browser", "com.microsoft.edgemac":
+            // Google Meet runs in a browser tab — the tab title is what
+            // we get, which often looks like "meet.google.com - Brave"
+            // or "Cooper team standup - Google Meet". Only fire when
+            // the window title gives strong signal.
+            if (lowered.contains("meet.google.com") && lowered.contains("- ")) ||
+               lowered.contains("google meet") {
+                return MeetingMatch(appBundleId: bundleId, appName: appName,
+                                    title: "Meet: \(title)", detectorKey: key)
+            }
+        case "com.apple.Safari":
+            if lowered.contains("meet.google.com") || lowered.contains("google meet") {
+                return MeetingMatch(appBundleId: bundleId, appName: appName,
+                                    title: "Meet: \(title)", detectorKey: key)
+            }
+        default:
+            return nil
+        }
+        return nil
+    }
+
+    func pollOnce() async {
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(
+                false, onScreenWindowsOnly: true
+            )
+        } catch {
+            logErr("watch: SCShareableContent fetch failed: \(error.localizedDescription)")
+            return
+        }
+
+        var current: [String: MeetingMatch] = [:]
+        for w in content.windows {
+            if let m = classify(w) {
+                current[m.detectorKey] = m
+            }
+        }
+        let currentIds = Set(current.keys)
+
+        // New meetings: in current but not in known.
+        for newKey in currentIds.subtracting(knownActiveIds) {
+            guard let m = current[newKey] else { continue }
+            emit("meeting-window-appeared", m.asDict)
+        }
+        // Ended meetings: in known but not in current.
+        for goneKey in knownActiveIds.subtracting(currentIds) {
+            emit("meeting-window-disappeared", ["detector_key": goneKey])
+        }
+        knownActiveIds = currentIds
+    }
+
+    func run() async {
+        logErr("watch: starting (poll interval 5s)")
+        emit("watcher-ready", [:])
+
+        // SIGTERM handler — engine sends this when toggling auto-detect off.
+        let sigterm = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
+        sigterm.setEventHandler { [weak self] in
+            logErr("watch: SIGTERM — exiting")
+            self?.stopFlag = true
+            try? FileHandle.standardOutput.synchronize()
+            exit(0)
+        }
+        sigterm.resume()
+        signal(SIGTERM, SIG_IGN)
+        sigtermSource = sigterm
+
+        // Stdin EOF → parent died → exit. Backgrounded for the same reason
+        // as the recording mode.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            while true {
+                let chunk = FileHandle.standardInput.availableData
+                if chunk.isEmpty {
+                    logErr("watch: stdin EOF — exiting")
+                    self?.stopFlag = true
+                    try? FileHandle.standardOutput.synchronize()
+                    exit(0)
+                }
+            }
+        }
+
+        while !stopFlag {
+            await pollOnce()
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+        }
+    }
+}
+
+// MARK: - Entry point
+//
+// Two modes:
+//   default (no flag) → audio capture for active recording
+//   --watch           → meeting-window presence detector
+//
+// `dispatchMain()` is the canonical CLI-tool answer to "park the main
+// thread forever." Crucial: we spawn setUp() in a *detached* Task so it
+// doesn't make the top-level script a "main task" that the Swift runtime
+// treats as the program's lifetime — if it were the main task,
+// dispatchMain() would be considered the task's continuation and the
+// runtime would exit when it "returned" (which it never does, but the
+// runtime can't tell). Detached Task + dispatchMain keeps the process
+// parked forever.
+
+if CommandLine.arguments.contains("--watch") {
+    let w = Watcher()
+    Task.detached { await w.run() }
+    dispatchMain()
+} else {
+    let tap = Tap()
+    Task.detached { await tap.setUp() }
+    dispatchMain()
+}

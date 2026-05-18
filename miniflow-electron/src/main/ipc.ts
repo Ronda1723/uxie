@@ -220,4 +220,7 @@ export function registerIpc() {
   });
   ipcMain.handle("meetings:skip",      (_e, id: number) => invoke("skip_meeting", { id }));
   ipcMain.handle("meetings:structure", (_e, id: number) => invoke("structure_meeting", { id }));
+  ipcMain.handle("meetings:getAutoDetect", () => invoke("get_auto_detect_meetings", {}));
+  ipcMain.handle("meetings:setAutoDetect", (_e, enabled: boolean) =>
+    invoke("set_auto_detect_meetings", { enabled }));
 }

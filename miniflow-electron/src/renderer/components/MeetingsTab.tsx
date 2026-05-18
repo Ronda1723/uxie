@@ -110,7 +110,9 @@ export function MeetingsTab() {
   const selected = meetings.find((m) => m.id === selectedId) ?? null;
 
   return (
-    <div style={{ display: "flex", height: "100%", gap: 0 }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      <AutoDetectBanner />
+      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
       <MeetingList
         meetings={meetings}
         selectedId={selectedId}
@@ -123,6 +125,67 @@ export function MeetingsTab() {
           ? <MeetingDetail meeting={selected} onChanged={refresh} />
           : <EmptyDetail />}
       </div>
+      </div>
+    </div>
+  );
+}
+
+function AutoDetectBanner() {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await (w.miniflow as any).getAutoDetectMeetings();
+        setEnabled(Boolean(r?.enabled));
+      } catch {
+        setEnabled(false);
+      }
+    })();
+  }, []);
+
+  async function toggle() {
+    if (enabled === null || busy) return;
+    setBusy(true);
+    try {
+      const next = !enabled;
+      await (w.miniflow as any).setAutoDetectMeetings(next);
+      setEnabled(next);
+    } catch (e) {
+      console.error("[meetings] toggle auto-detect failed:", e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (enabled === null) return null;
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 12,
+      padding: "10px 16px", borderBottom: "1px solid #e5e3df",
+      background: "rgba(255,255,255,0.4)", fontSize: 12,
+    }}>
+      <span style={{ flex: 1 }}>
+        <strong>Auto-detect meetings</strong>
+        <span style={{ color: "#666", marginLeft: 8 }}>
+          Watches for Slack huddles, Zoom calls, Teams meetings, and Google Meet tabs.
+        </span>
+      </span>
+      <button
+        onClick={toggle}
+        disabled={busy}
+        style={{
+          padding: "4px 12px", borderRadius: 12, border: "1px solid #ccc",
+          background: enabled ? "#1a1a1a" : "transparent",
+          color: enabled ? "#fff" : "#1a1a1a",
+          fontWeight: 600, fontSize: 12, cursor: busy ? "default" : "pointer",
+          minWidth: 56,
+        }}
+      >
+        {enabled ? "ON" : "OFF"}
+      </button>
     </div>
   );
 }
