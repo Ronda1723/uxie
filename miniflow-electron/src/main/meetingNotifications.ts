@@ -7,6 +7,7 @@ import { Notification, BrowserWindow } from "electron";
 
 import { invoke } from "./api";
 import { popoverWindow } from "./tray";
+import { IpcChannels } from "../shared/types";
 
 type DetectedPayload = {
   id?: number;
@@ -73,14 +74,36 @@ export function showMeetingDetectedNotification(payload: DetectedPayload): void 
   n.show();
 }
 
-async function startRecording(meetingId: number): Promise<void> {
+export async function startRecording(meetingId: number): Promise<void> {
   try {
+    // 1. Tell the engine to open a long-form Deepgram socket and flip
+    //    the meeting row to status="recording".
     await invoke("start_meeting_recording", { id: meetingId });
+    // 2. Tell the renderer to start mic capture in meeting mode. The
+    //    existing useAudioCapture hook handles getUserMedia and pumps
+    //    PCM chunks to the engine; audio.send_audio_chunk fans those
+    //    to the meeting socket while it's open.
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) w.webContents.send(IpcChannels.startCapture, { mode: "meeting" });
+    }
   } catch (e) {
     console.error("[meeting] start_recording failed:", e);
     return;
   }
-  // Slice 2 will start the audio tap here. For now, just refresh the UI.
+  broadcastMeetingsRefresh();
+}
+
+export async function stopRecording(meetingId: number, transcript: string = ""): Promise<void> {
+  try {
+    // 1. Stop the renderer mic first so no late chunks dribble into a
+    //    closed Deepgram socket.
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) w.webContents.send(IpcChannels.stopCapture, { mode: "meeting" });
+    }
+    await invoke("stop_meeting_recording", { id: meetingId, transcript });
+  } catch (e) {
+    console.error("[meeting] stop_recording failed:", e);
+  }
   broadcastMeetingsRefresh();
 }
 

@@ -24,7 +24,7 @@ function base64(bytes: Uint8Array): string {
   return btoa(s);
 }
 
-export type CaptureMode = "dictation" | "command";
+export type CaptureMode = "dictation" | "command" | "meeting";
 
 export function useAudioCapture() {
   const [capturing, setCapturing] = useState(false);
@@ -39,10 +39,11 @@ export function useAudioCapture() {
     let buffer: Float32Array[] = [];
     let bufferedSamples = 0;
     let watchdog: number | null = null;
+    let currentMode: CaptureMode = "dictation";
     let active = false;
     const flushEvery = Math.floor((SAMPLE_RATE * CHUNK_MS) / 1000);
 
-    async function start() {
+    async function start(modeArg: CaptureMode) {
       // Defensive cleanup: if a prior session leaked (e.g. sleep ate the
       // fn-release event, or the helper's event tap got disabled by macOS),
       // the previous stream/ctx/processor are still alive. Tearing them down
@@ -52,11 +53,17 @@ export function useAudioCapture() {
         await stop();
       }
       active = true;
+      currentMode = modeArg;
       setCapturing(true);
-      watchdog = window.setTimeout(() => {
-        console.warn("[audio] watchdog — forcing stop after", MAX_DICTATION_MS, "ms");
-        serialized(stop).catch(console.error);
-      }, MAX_DICTATION_MS);
+      // Meeting recordings run for hours — no 60s watchdog. The user
+      // owns lifecycle via the Stop button. Dictation + command modes
+      // keep the safety cap.
+      if (modeArg !== "meeting") {
+        watchdog = window.setTimeout(() => {
+          console.warn("[audio] watchdog — forcing stop after", MAX_DICTATION_MS, "ms");
+          serialized(() => stop()).catch(console.error);
+        }, MAX_DICTATION_MS);
+      }
       try {
         stream = await navigator.mediaDevices.getUserMedia({
           audio: {
@@ -159,11 +166,25 @@ export function useAudioCapture() {
     }
 
     const offStart = window.miniflow.onStartCapture((p: any) => {
-      setMode(p?.mode === "command" ? "command" : "dictation");
-      serialized(start).catch(console.error);
+      const m: CaptureMode =
+        p?.mode === "command" ? "command" :
+        p?.mode === "meeting" ? "meeting" :
+        "dictation";
+      // Don't let a fn-press hijack the mic while a meeting is recording.
+      // The meeting owns the stream until the user explicitly stops it.
+      if (currentMode === "meeting" && active && m !== "meeting") {
+        console.log("[audio] ignoring", m, "request — meeting recording is active");
+        return;
+      }
+      setMode(m);
+      serialized(() => start(m)).catch(console.error);
     });
-    const offStop  = window.miniflow.onStopCapture(() => {
-      serialized(stop).catch(console.error);
+    const offStop  = window.miniflow.onStopCapture((p: any) => {
+      // Mirror: only stop the meeting stream when explicitly asked to.
+      // A fn-release event must not tear down an active meeting recording.
+      const stopMode: CaptureMode | undefined = p?.mode;
+      if (currentMode === "meeting" && stopMode !== "meeting") return;
+      serialized(() => stop()).catch(console.error);
     });
 
     return () => {

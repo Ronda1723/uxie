@@ -18,8 +18,8 @@ interface MiniflowAPI {
   resetHotkey(): Promise<Hotkey>;
   // Voice
   sendAudioChunk(base64: string): Promise<unknown>;
-  onStartCapture(cb: () => void): () => void;
-  onStopCapture(cb: () => void): () => void;
+  onStartCapture(cb: (p: { mode: "dictation" | "command" | "meeting" }) => void): () => void;
+  onStopCapture(cb: (p: { mode: "dictation" | "command" | "meeting" }) => void): () => void;
   onAction(cb: (a: AgentAction) => void): () => void;
   onAgentStatus(cb: (s: string) => void): () => void;
   // History

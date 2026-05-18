@@ -61,6 +61,11 @@ else
   ls -la "$HELPER_DIR/target/release/miniflow-fn-helper"* 2>/dev/null | tail -1
 fi
 
+# The Swift audio-tap (native-helper/audio-tap/) is in tree but not
+# shipped yet — AVAudioEngine in CLI context delivers only one buffer
+# per session. Revisit when we have time to debug inside the .app
+# bundle.
+
 # ── Step 3: Electron TypeScript + Vite ────────────────────────────────────────
 
 echo ""

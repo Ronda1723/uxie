@@ -63,7 +63,8 @@ build_backend.sh           PyInstaller-only build
 - `miniflow-engine/agent.py` — LLM agent loop, grammar correction
 - `miniflow-engine/llm.py` — LLM provider abstraction (uxie = Railway proxy)
 - `miniflow-engine/config.py` — config + JWT storage, default provider = "uxie"
-- `miniflow-engine/meetings.py` — Note Taker: calendar poll loop + SQLite at `~/miniflow/meetings.db` + structure-meeting client (Slice 1; audio tap pending)
+- `miniflow-engine/meetings.py` — Note Taker: calendar poll loop + SQLite at `~/miniflow/meetings.db` + structure-meeting client
+- `miniflow-engine/audio_meeting.py` — thin shim that delegates to `audio.start_meeting_listening`. Reuses the renderer's mic capture path (browser getUserMedia → `voice:chunk` IPC → `audio.send_audio_chunk`), routing chunks to a long-form Deepgram socket whose finals get appended to the meeting's transcript. System-audio capture (ScreenCaptureKit) is prototyped in `native-helper/audio-tap/` but not shipping until we can debug AVAudioEngine inside an .app bundle.
 - `miniflow-engine/normalize.py` — email/URL spoken-word normalization
 - `miniflow-electron/src/main/overlayWindow.ts` — floating approval overlay
 - `miniflow-electron/src/main/meetingNotifications.ts` — native macOS notification with Record/Skip actions, fires on `meeting:detected` WS event

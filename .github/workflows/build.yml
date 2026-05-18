@@ -176,7 +176,7 @@ jobs:
                 "{}"
 
           # Sign any executable that isn't a .so/.dylib (PyInstaller's
-          # bootstrap binary, embedded helper tools).
+          # bootstrap binary, embedded helper tools, Swift audio-tap).
           find "$APP/Contents/Resources" -type f -perm -u+x \
             ! -name "*.so" ! -name "*.dylib" ! -name "*.png" ! -name "*.json" \
             ! -name "*.txt" ! -name "*.html" ! -name "*.css" ! -name "*.js" \

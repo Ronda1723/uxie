@@ -82,8 +82,9 @@ export function MeetingsTab() {
   useEffect(() => {
     checkConnection();
     refresh();
-    const offRefresh  = w.miniflow.onMeetingsRefresh?.(() => refresh());
-    const offDetected = w.miniflow.onMeetingDetected?.(() => refresh());
+    const offRefresh   = w.miniflow.onMeetingsRefresh?.(() => refresh());
+    const offDetected  = w.miniflow.onMeetingDetected?.(() => refresh());
+    const offTranscript = w.miniflow.onMeetingTranscriptUpdate?.(() => refresh());
     const offConnected = w.miniflow.onOAuthConnected?.((provider: string) => {
       if (provider === "google") {
         checkConnection();
@@ -93,6 +94,7 @@ export function MeetingsTab() {
     return () => {
       offRefresh?.();
       offDetected?.();
+      offTranscript?.();
       offConnected?.();
     };
   }, [refresh, checkConnection]);

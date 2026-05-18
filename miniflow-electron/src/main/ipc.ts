@@ -208,12 +208,16 @@ export function registerIpc() {
   ipcMain.handle("meetings:updateNotes", (_e, id: number, notes: string) =>
     invoke("update_meeting_notes", { id, notes })
   );
-  ipcMain.handle("meetings:startRecording", (_e, id: number) =>
-    invoke("start_meeting_recording", { id })
-  );
-  ipcMain.handle("meetings:stopRecording", (_e, id: number, transcript?: string) =>
-    invoke("stop_meeting_recording", { id, transcript: transcript ?? "" })
-  );
+  ipcMain.handle("meetings:startRecording", async (_e, id: number) => {
+    const { startRecording } = await import("./meetingNotifications");
+    await startRecording(id);
+    return { ok: true };
+  });
+  ipcMain.handle("meetings:stopRecording", async (_e, id: number, transcript?: string) => {
+    const { stopRecording } = await import("./meetingNotifications");
+    await stopRecording(id, transcript ?? "");
+    return { ok: true };
+  });
   ipcMain.handle("meetings:skip",      (_e, id: number) => invoke("skip_meeting", { id }));
   ipcMain.handle("meetings:structure", (_e, id: number) => invoke("structure_meeting", { id }));
 }

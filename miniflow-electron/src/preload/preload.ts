@@ -172,6 +172,7 @@ const api = {
   skipMeeting:         (id: number) => ipcRenderer.invoke("meetings:skip", id),
   structureMeeting:    (id: number) => ipcRenderer.invoke("meetings:structure", id),
   onMeetingDetected:   (cb: (m: any) => void) => listen("meeting:detected", cb),
+  onMeetingTranscriptUpdate: (cb: (m: any) => void) => listen("meeting:transcript-update", cb),
   onMeetingsRefresh:   (cb: () => void) => listen("meetings:refresh", () => cb()),
   onMeetingsReveal:    (cb: () => void) => listen("meetings:reveal", () => cb()),
 

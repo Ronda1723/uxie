@@ -78,7 +78,7 @@ export function App() {
               userName={userName}
               isListening={isListening}
               isProcessing={isProcessing}
-              captureMode={captureMode}
+              captureMode={captureMode === "meeting" ? "dictation" : captureMode}
             />
           )}
           {tab === "meetings"   && <MeetingsTab />}

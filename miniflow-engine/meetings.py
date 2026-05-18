@@ -136,14 +136,26 @@ def update_user_notes(meeting_id: int, notes: str) -> dict:
     return {"ok": True}
 
 
-def mark_recording_started(meeting_id: int) -> dict:
-    """Called by the (future) audio-tap sidecar when capture begins."""
-    return _set_status(meeting_id, "recording")
+async def mark_recording_started(meeting_id: int) -> dict:
+    """Start audio capture for `meeting_id`. Flips DB status to 'recording'
+    and spawns the audio-tap sidecar + Deepgram socket."""
+    import audio_meeting
+    res = await audio_meeting.start_capture(meeting_id)
+    if "error" in res:
+        # Don't flip status if we couldn't actually start. The UI Stop
+        # button still works (no-op) but the user can re-try.
+        return res
+    _set_status(meeting_id, "recording")
+    return {"ok": True}
 
 
-def mark_recording_ended(meeting_id: int, transcript: str = "") -> dict:
-    """Called when the audio tap finalizes a meeting. The transcript is
-    appended (or replaced if non-empty) atomically with the status flip."""
+async def mark_recording_ended(meeting_id: int, transcript: str = "") -> dict:
+    """Stop the audio tap and finalize the meeting. If a `transcript`
+    argument is passed (e.g. from a manual-paste UI), it REPLACES the
+    live-captured one — useful for testing without ScreenCaptureKit."""
+    import audio_meeting
+    if audio_meeting.active_meeting_id() == int(meeting_id):
+        await audio_meeting.stop_capture()
     _init_db()
     now = int(time.time())
     with _conn() as c:
@@ -159,6 +171,30 @@ def mark_recording_ended(meeting_id: int, transcript: str = "") -> dict:
                 (now, int(meeting_id)),
             )
     return {"ok": True}
+
+
+def append_transcript_chunk(meeting_id: int, chunk: str) -> dict:
+    """Append a finalized Deepgram chunk to the meeting's transcript.
+    Called from the audio_meeting pump on every is_final result."""
+    chunk = (chunk or "").strip()
+    if not chunk:
+        return {"id": int(meeting_id), "appended": False}
+    _init_db()
+    now = int(time.time())
+    with _conn() as c:
+        row = c.execute(
+            "SELECT transcript FROM meetings WHERE id = ?", (int(meeting_id),)
+        ).fetchone()
+        if row is None:
+            return {"id": int(meeting_id), "appended": False}
+        existing = row["transcript"] or ""
+        sep = " " if existing and not existing.endswith(("\n", " ")) else ""
+        new_transcript = (existing + sep + chunk)[:500_000]
+        c.execute(
+            "UPDATE meetings SET transcript = ?, updated_at = ? WHERE id = ?",
+            (new_transcript, now, int(meeting_id)),
+        )
+    return {"id": int(meeting_id), "appended": True, "transcript_len": len(new_transcript)}
 
 
 def mark_skipped(meeting_id: int) -> dict:

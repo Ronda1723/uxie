@@ -46,7 +46,7 @@ mac:
   # silent hang electron-builder's wrapper produces.
   notarize: false
   extendInfo:
-    NSMicrophoneUsageDescription: "Uxie needs microphone access for voice commands."
+    NSMicrophoneUsageDescription: "Uxie needs microphone access for voice commands and meeting recording."
     NSAccessibilityUsageDescription: "Uxie types dictated text into the focused app."
     # LSUIElement: false → Uxie shows in the Dock like a normal Mac app,
     # the tray icon also stays as a secondary entry point.

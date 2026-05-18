@@ -61,6 +61,7 @@ import llm as llm_module
 import hotkey as hotkey_module
 import mcp_client
 import meetings
+import audio_meeting
 from connectors import registry
 
 import pathlib
@@ -109,6 +110,7 @@ async def lifespan(app: FastAPI):
     dictation.set_event_broadcaster(manager.broadcast)
     agent.set_event_broadcaster(manager.broadcast)
     meetings.set_event_emitter(manager.broadcast)
+    audio_meeting.set_event_emitter(manager.broadcast)
     # Start MCP servers (Playwright always-on + any with saved credentials)
     asyncio.create_task(mcp_client.start())
     # Warm up litellm in the background so the first real LLM call doesn't

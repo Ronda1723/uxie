@@ -16,6 +16,11 @@ miniflow-electron/dist/
 # Rust
 native-helper/target/
 
+# Swift Package Manager build output
+native-helper/audio-tap/.build/
+native-helper/audio-tap/.swiftpm/
+native-helper/audio-tap/Package.resolved
+
 # Python venvs
 miniflow-engine/.venv/
 miniflow-engine/venv/
