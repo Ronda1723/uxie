@@ -565,59 +565,97 @@ final class Watcher {
         }
     }
 
+    // All bundle IDs we know about — used both for classification AND
+    // for diagnostic logging so the user's log shows the exact app +
+    // title strings their Slack/Zoom/Teams version is exposing.
+    static let MEETING_APP_BUNDLE_IDS: Set<String> = [
+        "com.tinyspeck.slackmacgap", "com.tinyspeck.slack",
+        "us.zoom.xos", "us.zoom.ZoomClips",
+        "com.microsoft.teams2", "com.microsoft.teams",
+        "com.cisco.webexmeetingsapp", "com.webex.meetingmanager",
+        "com.google.Chrome", "com.google.Chrome.canary",
+        "com.brave.Browser", "com.microsoft.edgemac",
+        "com.apple.Safari",
+        "com.hnc.Discord",
+        "com.electron.discord",
+    ]
+
     /// Decide whether a given SCWindow looks like an active meeting.
     /// Returns a MeetingMatch if yes, nil otherwise.
+    ///
+    /// Rules are intentionally permissive — false positives produce a
+    /// notification that the user can dismiss, false negatives mean the
+    /// feature didn't work at all. We bias toward firing.
     func classify(_ w: SCWindow) -> MeetingMatch? {
         guard let app = w.owningApplication else { return nil }
         let bundleId = app.bundleIdentifier
         let appName = app.applicationName
         let title = (w.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if title.isEmpty { return nil }
         let lowered = title.lowercased()
+        let frame = w.frame
+        let w_px = frame.width
+        let h_px = frame.height
 
-        // The detector_key MUST be stable for the lifetime of a single
-        // meeting so we don't fire duplicate notifications. Using
-        // (bundleId, window_id) gives us per-window stability — closing
-        // and reopening a huddle yields a new window id, hence a new
-        // detection.
+        // Per-instance stability key. Uses windowID so reopening a huddle
+        // generates a new key → new detection.
         let key = "\(bundleId)#\(w.windowID)"
 
         switch bundleId {
-        case "com.tinyspeck.slackmacgap":
-            if lowered.contains("huddle") || lowered.contains("slack call") {
+        case "com.tinyspeck.slackmacgap", "com.tinyspeck.slack":
+            // Slack huddle UX has two appearances across versions:
+            //   1. A popout window with a small frame (~280×600 historically,
+            //      varies). Main Slack window is much larger.
+            //   2. Inline with the main window — title becomes "Huddle in #…"
+            //      or contains "call".
+            //
+            // We accept either: small-and-not-main OR title contains the
+            // huddle/call keywords. Main Slack window typically has the
+            // workspace name in the title without "huddle"/"call".
+            let titleMatch = lowered.contains("huddle")
+                          || lowered.contains("slack call")
+                          || lowered.contains("call with")
+            let smallWindow = w_px > 0 && h_px > 0
+                           && w_px < 800 && h_px < 900
+            if titleMatch || smallWindow {
+                let pretty = title.isEmpty ? "Slack huddle" : "Slack: \(title)"
                 return MeetingMatch(appBundleId: bundleId, appName: appName,
-                                    title: "Slack: \(title)", detectorKey: key)
+                                    title: pretty, detectorKey: key)
             }
         case "us.zoom.xos", "us.zoom.ZoomClips":
-            if lowered.hasPrefix("zoom meeting") || lowered.contains("zoom webinar") {
+            if lowered.hasPrefix("zoom meeting")
+                || lowered.contains("zoom webinar")
+                || lowered.contains("zoom meeting") {
                 return MeetingMatch(appBundleId: bundleId, appName: appName,
                                     title: title, detectorKey: key)
             }
         case "com.microsoft.teams2", "com.microsoft.teams":
-            // Teams main-window title contains "Meeting in progress" or
-            // similar while in a call.
             if lowered.contains("meeting") || lowered.contains("call with") {
                 return MeetingMatch(appBundleId: bundleId, appName: appName,
                                     title: "Teams: \(title)", detectorKey: key)
             }
         case "com.cisco.webexmeetingsapp", "com.webex.meetingmanager":
-            return MeetingMatch(appBundleId: bundleId, appName: appName,
-                                title: "Webex: \(title)", detectorKey: key)
+            if !title.isEmpty {
+                return MeetingMatch(appBundleId: bundleId, appName: appName,
+                                    title: "Webex: \(title)", detectorKey: key)
+            }
         case "com.google.Chrome", "com.google.Chrome.canary",
-             "com.brave.Browser", "com.microsoft.edgemac":
-            // Google Meet runs in a browser tab — the tab title is what
-            // we get, which often looks like "meet.google.com - Brave"
-            // or "Cooper team standup - Google Meet". Only fire when
-            // the window title gives strong signal.
-            if (lowered.contains("meet.google.com") && lowered.contains("- ")) ||
-               lowered.contains("google meet") {
+             "com.brave.Browser", "com.microsoft.edgemac",
+             "com.apple.Safari":
+            if lowered.contains("meet.google.com")
+                || lowered.contains("google meet")
+                || lowered.contains("- meet")
+                || lowered.contains("- google meet") {
                 return MeetingMatch(appBundleId: bundleId, appName: appName,
                                     title: "Meet: \(title)", detectorKey: key)
             }
-        case "com.apple.Safari":
-            if lowered.contains("meet.google.com") || lowered.contains("google meet") {
+        case "com.hnc.Discord", "com.electron.discord":
+            // Discord voice / video calls — the call window's title
+            // typically contains "Voice Connected" or the channel name.
+            if lowered.contains("voice")
+                || lowered.contains("call")
+                || lowered.contains("video call") {
                 return MeetingMatch(appBundleId: bundleId, appName: appName,
-                                    title: "Meet: \(title)", detectorKey: key)
+                                    title: "Discord: \(title)", detectorKey: key)
             }
         default:
             return nil
@@ -634,6 +672,23 @@ final class Watcher {
         } catch {
             logErr("watch: SCShareableContent fetch failed: \(error.localizedDescription)")
             return
+        }
+
+        // Diagnostic: log every visible window from a known meeting-app
+        // bundle id (even if we don't classify it as a meeting). This is
+        // how we discover Slack's actual huddle title on a user's
+        // machine when our heuristic missed it — they share the log line,
+        // we update the rules.
+        var candidateCount = 0
+        for w in content.windows {
+            guard let app = w.owningApplication,
+                  Watcher.MEETING_APP_BUNDLE_IDS.contains(app.bundleIdentifier) else { continue }
+            candidateCount += 1
+            let titleSnippet = String((w.title ?? "(no title)").prefix(80))
+            logErr("watch: candidate app=\(app.bundleIdentifier) w=\(Int(w.frame.width))x\(Int(w.frame.height)) title=\(titleSnippet)")
+        }
+        if candidateCount == 0 {
+            logErr("watch: poll — \(content.windows.count) windows, 0 from known meeting apps")
         }
 
         var current: [String: MeetingMatch] = [:]
