@@ -602,21 +602,16 @@ final class Watcher {
 
         switch bundleId {
         case "com.tinyspeck.slackmacgap", "com.tinyspeck.slack":
-            // Slack huddle UX has two appearances across versions:
-            //   1. A popout window with a small frame (~280×600 historically,
-            //      varies). Main Slack window is much larger.
-            //   2. Inline with the main window — title becomes "Huddle in #…"
-            //      or contains "call".
+            // Slack's main window is ~888×767 — well within any "small"
+            // heuristic, so we can't lean on frame size. Title is the
+            // only reliable signal. Slack huddle window titles always
+            // contain one of these tokens when a huddle is active.
             //
-            // We accept either: small-and-not-main OR title contains the
-            // huddle/call keywords. Main Slack window typically has the
-            // workspace name in the title without "huddle"/"call".
-            let titleMatch = lowered.contains("huddle")
-                          || lowered.contains("slack call")
-                          || lowered.contains("call with")
-            let smallWindow = w_px > 0 && h_px > 0
-                           && w_px < 800 && h_px < 900
-            if titleMatch || smallWindow {
+            // Diagnostic log keeps showing every Slack window (matched
+            // or not) so we can extend this list if a Slack version
+            // ships a new title format.
+            let huddleTokens = ["huddle", "slack call", "call with", "audio call", "video call"]
+            if huddleTokens.contains(where: { lowered.contains($0) }) {
                 let pretty = title.isEmpty ? "Slack huddle" : "Slack: \(title)"
                 return MeetingMatch(appBundleId: bundleId, appName: appName,
                                     title: pretty, detectorKey: key)
