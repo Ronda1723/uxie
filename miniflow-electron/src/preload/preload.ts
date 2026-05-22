@@ -173,6 +173,12 @@ const api = {
   structureMeeting:    (id: number) => ipcRenderer.invoke("meetings:structure", id),
   getAutoDetectMeetings: () => ipcRenderer.invoke("meetings:getAutoDetect"),
   setAutoDetectMeetings: (enabled: boolean) => ipcRenderer.invoke("meetings:setAutoDetect", enabled),
+
+  // Background tasks (v1.1.0)
+  createTask:   (prompt: string) => ipcRenderer.invoke("tasks:create", prompt),
+  listTasks:    () => ipcRenderer.invoke("tasks:list"),
+  getTask:      (id: string) => ipcRenderer.invoke("tasks:get", id),
+  cancelTask:   (id: string) => ipcRenderer.invoke("tasks:cancel", id),
   onMeetingDetected:   (cb: (m: any) => void) => listen("meeting:detected", cb),
   onMeetingTranscriptUpdate: (cb: (m: any) => void) => listen("meeting:transcript-update", cb),
   onMeetingsRefresh:   (cb: () => void) => listen("meetings:refresh", () => cb()),

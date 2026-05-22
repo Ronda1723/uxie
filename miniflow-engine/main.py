@@ -503,6 +503,86 @@ async def _get_user_status():
     return data
 
 
+async def _tasks_create(prompt: str) -> dict:
+    """Create a background task on Railway. Returns {id, status}."""
+    import httpx
+    jwt = config.get_jwt()
+    if not jwt:
+        return {"error": "not signed in"}
+    base = config.get_uxie_backend_url()
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{base}/tasks/create",
+                headers={"Authorization": f"Bearer {jwt}"},
+                json={"prompt": prompt},
+            )
+        if r.status_code == 429:
+            return {"error": r.json().get("detail", "rate limit hit")}
+        r.raise_for_status()
+        return r.json()
+    except httpx.HTTPError as e:
+        return {"error": str(e)}
+
+
+async def _tasks_list() -> dict:
+    import httpx
+    jwt = config.get_jwt()
+    if not jwt:
+        return {"tasks": []}
+    base = config.get_uxie_backend_url()
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{base}/tasks",
+                headers={"Authorization": f"Bearer {jwt}"},
+            )
+        r.raise_for_status()
+        return r.json()
+    except httpx.HTTPError as e:
+        return {"tasks": [], "error": str(e)}
+
+
+async def _tasks_get(task_id: str) -> dict:
+    import httpx
+    jwt = config.get_jwt()
+    if not jwt:
+        return {"error": "not signed in"}
+    base = config.get_uxie_backend_url()
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{base}/tasks/{task_id}",
+                headers={"Authorization": f"Bearer {jwt}"},
+            )
+        if r.status_code == 404:
+            return {"error": "task not found"}
+        r.raise_for_status()
+        return r.json()
+    except httpx.HTTPError as e:
+        return {"error": str(e)}
+
+
+async def _tasks_cancel(task_id: str) -> dict:
+    import httpx
+    jwt = config.get_jwt()
+    if not jwt:
+        return {"error": "not signed in"}
+    base = config.get_uxie_backend_url()
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{base}/tasks/{task_id}/cancel",
+                headers={"Authorization": f"Bearer {jwt}"},
+            )
+        if r.status_code == 404:
+            return {"error": "task not found"}
+        r.raise_for_status()
+        return r.json()
+    except httpx.HTTPError as e:
+        return {"error": str(e)}
+
+
 async def _set_auto_detect_meetings(enabled: bool) -> dict:
     """Toggle persistent setting AND start/stop the watcher subprocess
     so the change takes effect immediately."""
@@ -620,6 +700,11 @@ async def invoke(command: str, body: dict = {}):
         "structure_meeting":     lambda b: meetings.structure_meeting(int(b["id"])),
         "get_auto_detect_meetings": lambda b: {"enabled": config.get_auto_detect_meetings()},
         "set_auto_detect_meetings": lambda b: _set_auto_detect_meetings(bool(b.get("enabled", False))),
+        # Background tasks (v1.1.0)
+        "tasks_create": lambda b: _tasks_create(b["prompt"]),
+        "tasks_list":   lambda b: _tasks_list(),
+        "tasks_get":    lambda b: _tasks_get(b["id"]),
+        "tasks_cancel": lambda b: _tasks_cancel(b["id"]),
         # App
         "open_settings":         lambda b: None,
     }

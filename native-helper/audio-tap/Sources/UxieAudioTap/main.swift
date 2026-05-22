@@ -537,6 +537,11 @@ final class Watcher {
     private var knownActiveIds: Set<String> = []
     private var stopFlag = false
     private var sigtermSource: DispatchSourceSignal?
+    // Suppress per-poll candidate logging when the set of visible
+    // meeting-app windows hasn't changed since last poll. Without this
+    // we'd write ~12 lines/minute forever; with it we log only when a
+    // meeting starts, ends, or a window's title changes.
+    private var lastCandidateSignature: String = "__init__"
 
     func emit(_ kind: String, _ payload: [String: Any]) {
         var event = payload
@@ -669,21 +674,30 @@ final class Watcher {
             return
         }
 
-        // Diagnostic: log every visible window from a known meeting-app
-        // bundle id (even if we don't classify it as a meeting). This is
-        // how we discover Slack's actual huddle title on a user's
-        // machine when our heuristic missed it — they share the log line,
-        // we update the rules.
+        // Diagnostic logging — only log on STATE CHANGE so the engine log
+        // doesn't balloon. Previous-poll signature lives in
+        // `lastCandidateSignature`; new signature = sorted "app|title|wxh"
+        // per candidate. If they match, suppress logs entirely.
+        var sigParts: [String] = []
         var candidateCount = 0
         for w in content.windows {
             guard let app = w.owningApplication,
                   Watcher.MEETING_APP_BUNDLE_IDS.contains(app.bundleIdentifier) else { continue }
             candidateCount += 1
             let titleSnippet = String((w.title ?? "(no title)").prefix(80))
-            logErr("watch: candidate app=\(app.bundleIdentifier) w=\(Int(w.frame.width))x\(Int(w.frame.height)) title=\(titleSnippet)")
+            sigParts.append("\(app.bundleIdentifier)|\(titleSnippet)|\(Int(w.frame.width))x\(Int(w.frame.height))")
         }
-        if candidateCount == 0 {
-            logErr("watch: poll — \(content.windows.count) windows, 0 from known meeting apps")
+        sigParts.sort()
+        let signature = sigParts.joined(separator: "\n")
+        if signature != lastCandidateSignature {
+            lastCandidateSignature = signature
+            if candidateCount == 0 {
+                logErr("watch: now zero meeting-app windows visible")
+            } else {
+                for s in sigParts {
+                    logErr("watch: candidate \(s)")
+                }
+            }
         }
 
         var current: [String: MeetingMatch] = [:]

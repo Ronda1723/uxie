@@ -4,11 +4,12 @@ import { HomeTab } from "./components/HomeTab";
 import { DictionaryTab } from "./components/DictionaryTab";
 import { SnippetsTab } from "./components/SnippetsTab";
 import { MeetingsTab } from "./components/MeetingsTab";
+import { TasksTab } from "./components/TasksTab";
 import { SettingsModal } from "./components/SettingsModal";
 import { Onboarding } from "./components/Onboarding";
 import { useAudioCapture } from "./audio";
 
-export type SidebarTab = "home" | "meetings" | "dictionary" | "snippets";
+export type SidebarTab = "home" | "tasks" | "meetings" | "dictionary" | "snippets";
 
 export function App() {
   const [tab, setTab] = useState<SidebarTab>("home");
@@ -81,6 +82,7 @@ export function App() {
               captureMode={captureMode === "meeting" ? "dictation" : captureMode}
             />
           )}
+          {tab === "tasks"      && <TasksTab />}
           {tab === "meetings"   && <MeetingsTab />}
           {tab === "dictionary" && <DictionaryTab />}
           {tab === "snippets"   && <SnippetsTab />}

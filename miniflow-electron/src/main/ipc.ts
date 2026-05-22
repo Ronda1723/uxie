@@ -223,4 +223,10 @@ export function registerIpc() {
   ipcMain.handle("meetings:getAutoDetect", () => invoke("get_auto_detect_meetings", {}));
   ipcMain.handle("meetings:setAutoDetect", (_e, enabled: boolean) =>
     invoke("set_auto_detect_meetings", { enabled }));
+
+  // Background tasks (v1.1.0)
+  ipcMain.handle("tasks:create", (_e, prompt: string) => invoke("tasks_create", { prompt }));
+  ipcMain.handle("tasks:list",   () => invoke("tasks_list", {}));
+  ipcMain.handle("tasks:get",    (_e, id: string) => invoke("tasks_get", { id }));
+  ipcMain.handle("tasks:cancel", (_e, id: string) => invoke("tasks_cancel", { id }));
 }

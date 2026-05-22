@@ -147,9 +147,24 @@ function AutoDetectBanner() {
 
   async function toggle() {
     if (enabled === null || busy) return;
+    // First-time turn-on: warn about the upcoming Screen Recording TCC
+    // prompt + the macOS quirk of requiring a relaunch after grant. Skip
+    // the explainer if the user is turning OFF.
+    const next = !enabled;
+    if (next) {
+      const ok = confirm(
+        "Auto-detect needs macOS Screen Recording permission.\n\n" +
+        "1. When you click OK, Uxie starts watching for meeting windows.\n" +
+        "2. macOS will pop a one-time prompt — click Allow.\n" +
+        "3. If you don't see the prompt within a few seconds, open " +
+        "System Settings → Privacy & Security → Screen Recording and " +
+        "enable UxieAudioTap manually.\n" +
+        "4. After granting, fully quit + reopen Uxie once (macOS quirk)."
+      );
+      if (!ok) return;
+    }
     setBusy(true);
     try {
-      const next = !enabled;
       await (w.miniflow as any).setAutoDetectMeetings(next);
       setEnabled(next);
     } catch (e) {
