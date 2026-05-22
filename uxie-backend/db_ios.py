@@ -79,6 +79,39 @@ class RefreshToken(Base):
     last_used_at = Column(DateTime(timezone=True), nullable=True)
 
 
+class BackgroundTask(Base):
+    """One row per user-initiated background task. Runs detached from any
+    HTTP request — survives Mac sleep/quit because the loop lives on
+    Railway. Status flows: queued → running → (completed | failed | cancelled).
+    A future state `needs_approval` will gate destructive tool calls (v1.2)."""
+    __tablename__ = "background_tasks"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    prompt = Column(Text, nullable=False)
+    status = Column(String, nullable=False, default="queued", index=True)
+    result_md = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now, index=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class TaskEvent(Base):
+    """Append-only log of everything that happens during a background task —
+    LLM reasoning, tool calls, tool results, errors, final text. The Tasks
+    tab on the Mac polls /tasks/{id} which returns this sequence for live
+    progress rendering."""
+    __tablename__ = "task_events"
+
+    id = Column(Integer, primary_key=True)
+    task_id = Column(String, ForeignKey("background_tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    seq = Column(Integer, nullable=False)  # ordering within a task; 0-based
+    kind = Column(String, nullable=False)  # step_start | tool_call | tool_result | thinking | final_text | error
+    data = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now, index=True)
+
+
 class OAuthToken(Base):
     """Server-side OAuth tokens for connectors (Slack, Google, GitHub, ...).
     One row per (user_id, provider). The OAuth callback flow (TODO) writes

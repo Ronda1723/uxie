@@ -243,3 +243,11 @@ app.add_api_route("/user/connections/{provider}", _disconnect, methods=["DELETE"
 # provider's client_secret baked into the DMG.
 from connector_tokens import connector_token as _connector_token  # noqa: E402
 app.add_api_route("/user/connector_token/{provider}", _connector_token, methods=["GET"])
+
+# /tasks/* — background agent tasks (v1.1.0). Detached from the HTTP
+# request; client polls /tasks/{id} for progress.
+import tasks as _tasks  # noqa: E402
+app.add_api_route("/tasks/create",      _tasks.tasks_create, methods=["POST"])
+app.add_api_route("/tasks",             _tasks.tasks_list,   methods=["GET"])
+app.add_api_route("/tasks/{task_id}",   _tasks.tasks_get,    methods=["GET"])
+app.add_api_route("/tasks/{task_id}/cancel", _tasks.tasks_cancel, methods=["POST"])
