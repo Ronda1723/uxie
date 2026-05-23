@@ -46,9 +46,20 @@ async def lifespan(app: FastAPI):
             "DATABASE_URL is set in this service's environment variables."
         )
         raise
+
+    # Scheduled-task cron worker (v1.2 — Morning Brief etc). Runs forever
+    # until lifespan exits; cancellation is best-effort.
+    import scheduled_tasks as _sched
+    cron_task = __import__("asyncio").create_task(_sched.cron_worker())
+
     try:
         yield
     finally:
+        cron_task.cancel()
+        try:
+            await cron_task
+        except Exception:
+            pass
         await proxy.close_http()
 
 
@@ -251,3 +262,10 @@ app.add_api_route("/tasks/create",      _tasks.tasks_create, methods=["POST"])
 app.add_api_route("/tasks",             _tasks.tasks_list,   methods=["GET"])
 app.add_api_route("/tasks/{task_id}",   _tasks.tasks_get,    methods=["GET"])
 app.add_api_route("/tasks/{task_id}/cancel", _tasks.tasks_cancel, methods=["POST"])
+
+# /scheduled_tasks/* — recurring user workflows (Morning Brief etc, v1.2)
+import scheduled_tasks as _sched_routes  # noqa: E402
+app.add_api_route("/scheduled_tasks",        _sched_routes.scheduled_list,   methods=["GET"])
+app.add_api_route("/scheduled_tasks",        _sched_routes.scheduled_create, methods=["POST"])
+app.add_api_route("/scheduled_tasks/{st_id}", _sched_routes.scheduled_patch,  methods=["PATCH"])
+app.add_api_route("/scheduled_tasks/{st_id}", _sched_routes.scheduled_delete, methods=["DELETE"])

@@ -112,6 +112,35 @@ class TaskEvent(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now, index=True)
 
 
+class ScheduledTask(Base):
+    """User-configured recurring task. The cron worker on Railway picks
+    these up at their scheduled time and spawns a one-off BackgroundTask
+    (so each run has its own event log + status, while the schedule
+    config lives here).
+
+    `kind` is the workflow template. v1 ships only "morning_brief"; future
+    kinds (end_of_day_recap, weekly_digest, custom) just need a new
+    handler in scheduled_tasks.py.
+
+    `run_time_local` is "HH:MM" in the user's timezone. The cron worker
+    polls every minute; whenever the local time matches a scheduled
+    task's run_time and we haven't fired today, we kick it off."""
+    __tablename__ = "scheduled_tasks"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    kind = Column(String, nullable=False)             # "morning_brief" | ...
+    enabled = Column(Boolean, nullable=False, default=True)
+    run_time_local = Column(String(5), nullable=False)  # "08:00", "21:30", ...
+    timezone = Column(String, nullable=False, default="UTC")  # IANA name, e.g. "Asia/Kolkata"
+    delivery_json = Column(JSON, nullable=True)       # {"notification": true, "email": true}
+    config_json = Column(JSON, nullable=True)         # kind-specific config (subject prefix, scopes, etc.)
+    last_fired_at = Column(DateTime(timezone=True), nullable=True)
+    last_task_id = Column(String, nullable=True)      # links to background_tasks.id of the most recent run
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now, index=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+
+
 class OAuthToken(Base):
     """Server-side OAuth tokens for connectors (Slack, Google, GitHub, ...).
     One row per (user_id, provider). The OAuth callback flow (TODO) writes
