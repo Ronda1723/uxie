@@ -441,3 +441,26 @@ async def scheduled_delete(
     await db.delete(st)
     await db.commit()
     return {"ok": True}
+
+
+async def scheduled_fire_now(
+    st_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    """Force-run a scheduled task immediately — useful for testing the
+    brief without waiting for 8am. Resets last_fired_at so the regular
+    daily fire still happens later if the user expects it."""
+    st = (await db.execute(
+        select(ScheduledTask).where(
+            ScheduledTask.id == st_id, ScheduledTask.user_id == user.id,
+        )
+    )).scalar_one_or_none()
+    if st is None:
+        raise HTTPException(404, "scheduled task not found")
+    # Reset last_fired_at to yesterday so the daily cadence isn't
+    # broken by the manual fire.
+    st.last_fired_at = datetime.now(_tz.utc) - timedelta(days=1)
+    await db.commit()
+    asyncio.create_task(_fire(st_id))
+    return {"ok": True, "fired": True}

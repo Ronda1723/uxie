@@ -269,3 +269,4 @@ app.add_api_route("/scheduled_tasks",        _sched_routes.scheduled_list,   met
 app.add_api_route("/scheduled_tasks",        _sched_routes.scheduled_create, methods=["POST"])
 app.add_api_route("/scheduled_tasks/{st_id}", _sched_routes.scheduled_patch,  methods=["PATCH"])
 app.add_api_route("/scheduled_tasks/{st_id}", _sched_routes.scheduled_delete, methods=["DELETE"])
+app.add_api_route("/scheduled_tasks/{st_id}/fire", _sched_routes.scheduled_fire_now, methods=["POST"])
