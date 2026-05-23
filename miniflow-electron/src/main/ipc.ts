@@ -229,4 +229,12 @@ export function registerIpc() {
   ipcMain.handle("tasks:list",   () => invoke("tasks_list", {}));
   ipcMain.handle("tasks:get",    (_e, id: string) => invoke("tasks_get", { id }));
   ipcMain.handle("tasks:cancel", (_e, id: string) => invoke("tasks_cancel", { id }));
+
+  // Scheduled tasks / Briefings (v1.2)
+  ipcMain.handle("sched:list",   () => invoke("sched_list", {}));
+  ipcMain.handle("sched:create", (_e, body: Record<string, unknown>) => invoke("sched_create", body));
+  ipcMain.handle("sched:patch",  (_e, id: string, patch: Record<string, unknown>) =>
+    invoke("sched_patch", { id, ...patch }));
+  ipcMain.handle("sched:delete", (_e, id: string) => invoke("sched_delete", { id }));
+  ipcMain.handle("sched:fire",   (_e, id: string) => invoke("sched_fire", { id }));
 }

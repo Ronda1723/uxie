@@ -179,6 +179,13 @@ const api = {
   listTasks:    () => ipcRenderer.invoke("tasks:list"),
   getTask:      (id: string) => ipcRenderer.invoke("tasks:get", id),
   cancelTask:   (id: string) => ipcRenderer.invoke("tasks:cancel", id),
+
+  // Scheduled tasks / Briefings (v1.2)
+  listSchedules:  () => ipcRenderer.invoke("sched:list"),
+  createSchedule: (body: any) => ipcRenderer.invoke("sched:create", body),
+  patchSchedule:  (id: string, patch: any) => ipcRenderer.invoke("sched:patch", id, patch),
+  deleteSchedule: (id: string) => ipcRenderer.invoke("sched:delete", id),
+  fireSchedule:   (id: string) => ipcRenderer.invoke("sched:fire", id),
   onMeetingDetected:   (cb: (m: any) => void) => listen("meeting:detected", cb),
   onMeetingTranscriptUpdate: (cb: (m: any) => void) => listen("meeting:transcript-update", cb),
   onMeetingsRefresh:   (cb: () => void) => listen("meetings:refresh", () => cb()),

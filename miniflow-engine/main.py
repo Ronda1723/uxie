@@ -583,6 +583,52 @@ async def _tasks_cancel(task_id: str) -> dict:
         return {"error": str(e)}
 
 
+# ── Scheduled tasks (Briefings, v1.2) ─────────────────────────────────────────
+
+
+async def _sched_request(method: str, path: str, body: dict | None = None) -> dict:
+    """Thin proxy from engine to Railway /scheduled_tasks/* — keeps
+    JWT/auth in one place."""
+    import httpx
+    jwt = config.get_jwt()
+    if not jwt:
+        return {"error": "not signed in"}
+    base = config.get_uxie_backend_url()
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.request(
+                method, f"{base}{path}",
+                headers={"Authorization": f"Bearer {jwt}"},
+                json=body,
+            )
+        if r.status_code == 404:
+            return {"error": "not found"}
+        r.raise_for_status()
+        return r.json() if r.text else {"ok": True}
+    except httpx.HTTPError as e:
+        return {"error": str(e)}
+
+
+async def _sched_list() -> dict:
+    return await _sched_request("GET", "/scheduled_tasks")
+
+
+async def _sched_create(body: dict) -> dict:
+    return await _sched_request("POST", "/scheduled_tasks", body=body)
+
+
+async def _sched_patch(st_id: str, body: dict) -> dict:
+    return await _sched_request("PATCH", f"/scheduled_tasks/{st_id}", body=body)
+
+
+async def _sched_delete(st_id: str) -> dict:
+    return await _sched_request("DELETE", f"/scheduled_tasks/{st_id}")
+
+
+async def _sched_fire(st_id: str) -> dict:
+    return await _sched_request("POST", f"/scheduled_tasks/{st_id}/fire")
+
+
 async def _set_auto_detect_meetings(enabled: bool) -> dict:
     """Toggle persistent setting AND start/stop the watcher subprocess
     so the change takes effect immediately."""
@@ -705,6 +751,12 @@ async def invoke(command: str, body: dict = {}):
         "tasks_list":   lambda b: _tasks_list(),
         "tasks_get":    lambda b: _tasks_get(b["id"]),
         "tasks_cancel": lambda b: _tasks_cancel(b["id"]),
+        # Scheduled tasks / Briefings (v1.2)
+        "sched_list":   lambda b: _sched_list(),
+        "sched_create": lambda b: _sched_create(b),
+        "sched_patch":  lambda b: _sched_patch(b["id"], {k: v for k, v in b.items() if k != "id"}),
+        "sched_delete": lambda b: _sched_delete(b["id"]),
+        "sched_fire":   lambda b: _sched_fire(b["id"]),
         # App
         "open_settings":         lambda b: None,
     }
