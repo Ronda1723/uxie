@@ -28,6 +28,8 @@ log = logging.getLogger("connectors.google")
 PROVIDER = "google"
 
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1"
+CALENDAR_API = "https://www.googleapis.com/calendar/v3"
+DRIVE_API = "https://www.googleapis.com/drive/v3"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 
@@ -66,6 +68,38 @@ TOOLS: list[dict[str, Any]] = [
             "subject": {"type": "string"},
             "body": {"type": "string"},
         }, "required": ["to", "subject", "body"]},
+    }},
+    # ── Calendar ──────────────────────────────────────────────────────────────
+    {"type": "function", "function": {
+        "name": "calendar_list_events",
+        "description": "List upcoming Google Calendar events on the user's primary calendar. USE THIS when the user asks about their schedule, meetings, calendar, or 'what's coming up'. Returns a list of events with title, start time, end time, and attendees.",
+        "parameters": {"type": "object", "properties": {
+            "days_ahead": {"type": "integer", "default": 7, "description": "How many days to look ahead from now. Use 1 for today, 7 for the week, 30 for the month."},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "calendar_check_availability",
+        "description": "Check the user's free/busy status on a specific date or datetime. USE THIS when the user asks 'am I free at X' or 'is Tuesday open'. Returns busy time ranges.",
+        "parameters": {"type": "object", "properties": {
+            "date": {"type": "string", "description": "ISO 8601 date or datetime (e.g. 2026-05-23 or 2026-05-23T14:00:00-07:00)"},
+            "duration_hours": {"type": "number", "default": 1},
+        }, "required": ["date"]},
+    }},
+    # ── Drive ─────────────────────────────────────────────────────────────────
+    {"type": "function", "function": {
+        "name": "drive_search",
+        "description": "Search Google Drive for files matching a query. Returns matching files with id, name, and mimeType.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "Free text search across file content + metadata"},
+            "limit": {"type": "integer", "default": 5},
+        }, "required": ["query"]},
+    }},
+    {"type": "function", "function": {
+        "name": "drive_read",
+        "description": "Export a Google Drive file (Doc / Sheet / Slide) as plain text. Use AFTER drive_search to read a specific file's contents.",
+        "parameters": {"type": "object", "properties": {
+            "fileId": {"type": "string"},
+        }, "required": ["fileId"]},
     }},
 ]
 
@@ -127,9 +161,9 @@ async def _refresh_access_token(http: httpx.AsyncClient, token: OAuthToken, db: 
         return None
 
 
-async def _gmail_request(
+async def _google_request(
     method: str,
-    path: str,
+    url: str,
     token: OAuthToken,
     http: httpx.AsyncClient,
     db: AsyncSession,
@@ -137,11 +171,11 @@ async def _gmail_request(
     params: dict | None = None,
     json: dict | None = None,
 ) -> dict:
-    """One-shot Gmail HTTP call with automatic 401-retry-after-refresh."""
+    """One-shot Google API call with automatic 401-retry-after-refresh.
+    Generic across Gmail / Calendar / Drive — caller passes the absolute URL."""
     async def _call(access_token: str) -> httpx.Response:
         return await http.request(
-            method,
-            f"{GMAIL_API}{path}",
+            method, url,
             headers={"Authorization": f"Bearer {access_token}"},
             params=params,
             json=json,
@@ -153,8 +187,28 @@ async def _gmail_request(
         if new_token:
             resp = await _call(new_token)
     if resp.status_code >= 400:
-        raise RuntimeError(f"Gmail {method} {path} → {resp.status_code}: {resp.text[:200]}")
-    return resp.json()
+        raise RuntimeError(f"Google {method} {url} → {resp.status_code}: {resp.text[:200]}")
+    # Some Drive export endpoints return text, not JSON.
+    ctype = resp.headers.get("content-type", "")
+    if "application/json" in ctype:
+        return resp.json()
+    return {"_raw_text": resp.text}
+
+
+async def _gmail_request(
+    method: str,
+    path: str,
+    token: OAuthToken,
+    http: httpx.AsyncClient,
+    db: AsyncSession,
+    *,
+    params: dict | None = None,
+    json: dict | None = None,
+) -> dict:
+    """Backwards-compatible wrapper — Gmail-specific path prefix."""
+    return await _google_request(
+        method, f"{GMAIL_API}{path}", token, http, db, params=params, json=json,
+    )
 
 
 # ── Execute ──────────────────────────────────────────────────────────────────
@@ -225,6 +279,82 @@ async def execute(
                 json={"message": _make_mime(args["to"], args["subject"], args["body"])},
             )
             return True, f"Draft created for {args['to']}."
+
+        # ── Calendar ─────────────────────────────────────────────────────────
+        elif name == "calendar_list_events":
+            from datetime import datetime, timedelta, timezone as _tz
+            now = datetime.now(_tz.utc)
+            end = now + timedelta(days=int(args.get("days_ahead", 7)))
+            res = await _google_request(
+                "GET", f"{CALENDAR_API}/calendars/primary/events", token, http, db,
+                params={
+                    "timeMin": now.isoformat().replace("+00:00", "Z"),
+                    "timeMax": end.isoformat().replace("+00:00", "Z"),
+                    "singleEvents": "true",
+                    "orderBy": "startTime",
+                    "maxResults": 50,
+                },
+            )
+            events = res.get("items", [])
+            if not events:
+                return True, "No upcoming events in that window."
+            lines = []
+            for e in events:
+                start = e.get("start", {}).get("dateTime") or e.get("start", {}).get("date") or ""
+                title = e.get("summary", "(No title)")
+                attendees = [a.get("email", "") for a in e.get("attendees", []) if a.get("email")]
+                link = e.get("hangoutLink") or ""
+                lines.append(
+                    f"- {start}  {title}"
+                    + (f"  (attendees: {', '.join(attendees[:5])})" if attendees else "")
+                    + (f"  {link}" if link else "")
+                )
+            return True, "\n".join(lines)
+
+        elif name == "calendar_check_availability":
+            from datetime import datetime, timedelta, timezone as _tz
+            try:
+                dt = datetime.fromisoformat(args["date"])
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=_tz.utc)
+            except Exception:
+                dt = datetime.now(_tz.utc)
+            window = timedelta(hours=float(args.get("duration_hours", 1)))
+            res = await _google_request(
+                "POST", f"{CALENDAR_API}/freeBusy", token, http, db,
+                json={
+                    "timeMin": dt.isoformat(),
+                    "timeMax": (dt + window).isoformat(),
+                    "items": [{"id": "primary"}],
+                },
+            )
+            busy = res.get("calendars", {}).get("primary", {}).get("busy", [])
+            if not busy:
+                return True, f"Calendar is free from {args['date']} for {window.total_seconds()/3600}h."
+            return True, "Busy:\n" + "\n".join(f"  {b['start']} – {b['end']}" for b in busy)
+
+        # ── Drive ────────────────────────────────────────────────────────────
+        elif name == "drive_search":
+            q = f"fullText contains '{args['query']}' and trashed = false"
+            res = await _google_request(
+                "GET", f"{DRIVE_API}/files", token, http, db,
+                params={"q": q, "pageSize": int(args.get("limit", 5)),
+                        "fields": "files(id,name,mimeType)"},
+            )
+            files = res.get("files", [])
+            if not files:
+                return True, "No files found."
+            return True, "\n".join(
+                f"- {f['name']} (id={f['id']}, type={f['mimeType']})" for f in files
+            )
+
+        elif name == "drive_read":
+            res = await _google_request(
+                "GET", f"{DRIVE_API}/files/{args['fileId']}/export", token, http, db,
+                params={"mimeType": "text/plain"},
+            )
+            text = res.get("_raw_text") or ""
+            return True, text[:5000]
 
         return False, f"Unknown Google tool: {name}"
 
