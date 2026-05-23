@@ -147,25 +147,51 @@ async def _read_only_tool_schemas(db: AsyncSession, user_id: int) -> list[dict]:
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
 
-SYSTEM_PROMPT = """You are Uxie's background-task agent. The user has given you a task to
-run in the background while they keep working. You can call tools to
-read information (Gmail, Calendar, Drive). You cannot send messages,
-create events, or do anything destructive — those tools are not
-available to you in this mode.
+SYSTEM_PROMPT_TEMPLATE = """You are Uxie's background-task agent. The user has given you a task to
+run in the background while they keep working.
 
-Rules:
-1. Plan briefly, then act. Don't narrate every step.
-2. Use the user's tools to gather information directly — don't ask the
-   user clarifying questions, as they aren't around to answer.
-3. Be thorough. A background task is expected to take longer than a
-   voice command; use multiple tool calls if helpful.
-4. End with a clear Markdown summary of what you found. Use headings,
+AVAILABLE TOOLS (you MUST use these — do not say "I can't access X" if
+a tool for X is in this list):
+{tool_list}
+
+Hard rules:
+1. ALWAYS call the relevant tool when the user's request maps to one of
+   the available tools. NEVER respond with "I can't check your calendar"
+   or "you'll need to look that up" when a tool for that exact thing is
+   listed above. Use the tool.
+2. Plan briefly, then act. Don't narrate every step.
+3. Don't ask the user clarifying questions — they're not around to answer.
+   Make a reasonable assumption and proceed.
+4. Be thorough. Multiple tool calls are encouraged — search first, read
+   the relevant results, then summarize.
+5. End with a clear Markdown summary of what you found. Use headings,
    bullets, and action items where it helps the user scan.
-5. If you can't complete the task (missing access, no data found, etc.),
-   say so clearly in the summary — don't make things up.
-6. You have a hard cap of 8 turns. Prioritize getting useful information
+6. If a tool returns "user has not connected X" or a permission error,
+   tell the user to open Settings → Connectors and reconnect that
+   provider — don't try to guess the answer without the tool.
+7. You have a hard cap of 8 turns. Prioritize getting useful information
    into the summary over thoroughness.
+
+You cannot send messages, create events, or do anything destructive in
+this mode — only the read-only tools above are available.
 """
+
+
+def _build_system_prompt(tool_schemas: list[dict]) -> str:
+    """Render SYSTEM_PROMPT_TEMPLATE with the actual list of tools the LLM
+    has access to. Listing them inline (not just via the OpenAI tools=…
+    field) measurably improves tool-call rates."""
+    if not tool_schemas:
+        tool_list = "(no tools are currently available — the user has not connected any data providers)"
+    else:
+        lines = []
+        for s in tool_schemas:
+            fn = s.get("function") or {}
+            name = fn.get("name", "?")
+            desc = (fn.get("description") or "").strip().split("\n")[0][:120]
+            lines.append(f"  • {name} — {desc}")
+        tool_list = "\n".join(lines)
+    return SYSTEM_PROMPT_TEMPLATE.format(tool_list=tool_list)
 
 
 async def _run_task_loop(task_id: str, user_id: int, prompt: str) -> None:
@@ -184,8 +210,25 @@ async def _run_task_loop(task_id: str, user_id: int, prompt: str) -> None:
             await db.commit()
 
             tool_schemas = await _read_only_tool_schemas(db, user_id)
+
+            # If the user hasn't connected any data providers, fail
+            # immediately with a clear message rather than let the LLM
+            # hallucinate / refuse a useless answer.
+            if not tool_schemas:
+                msg = (
+                    "You haven't connected any data providers yet. "
+                    "Open **Settings → Connectors** and connect Google (Gmail + Calendar + Drive) "
+                    "to enable background tasks."
+                )
+                await _append_event(db, task_id, "final_text", {"text": msg})
+                await _update_task_status(
+                    db, task_id, status="completed", result_md=msg, completed=True,
+                )
+                await db.commit()
+                return
+
             messages: list[dict] = [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": _build_system_prompt(tool_schemas)},
                 {"role": "user", "content": prompt},
             ]
 
@@ -293,7 +336,26 @@ async def _run_task_loop(task_id: str, user_id: int, prompt: str) -> None:
                             result_str = result if isinstance(result, str) else json.dumps(result, default=str)
                         except Exception as e:
                             ok = False
-                            result_str = f"tool exception: {e}"
+                            raw = str(e)
+                            # Translate the most common low-level errors into
+                            # something actionable. Without this, the LLM sees
+                            # a raw "Gmail GET /users/me/messages → 401: {…}"
+                            # and either guesses or repeats the error verbatim.
+                            if "401" in raw:
+                                result_str = (
+                                    "Your Google connection has expired or been revoked. "
+                                    "Tell the user: open Settings → Connectors, disconnect Google, then reconnect. "
+                                    f"(raw: {raw[:200]})"
+                                )
+                            elif "403" in raw:
+                                result_str = (
+                                    "Google denied the request — likely an OAuth scope is missing. "
+                                    "Tell the user: disconnect and reconnect Google in Settings → Connectors "
+                                    "to re-grant the required scopes. "
+                                    f"(raw: {raw[:200]})"
+                                )
+                            else:
+                                result_str = f"tool exception: {raw[:500]}"
 
                     await _append_event(db, task_id, "tool_result", {
                         "id": tc_id, "name": name, "ok": ok,
