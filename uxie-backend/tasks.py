@@ -206,8 +206,6 @@ async def _run_task_loop(task_id: str, user_id: int, prompt: str) -> None:
 
         try:
             await _update_task_status(db, task_id, status="running")
-            await _append_event(db, task_id, "step_start", {"step": "agent_loop"})
-            await db.commit()
 
             tool_schemas = await _read_only_tool_schemas(db, user_id)
 
@@ -226,6 +224,16 @@ async def _run_task_loop(task_id: str, user_id: int, prompt: str) -> None:
                 )
                 await db.commit()
                 return
+
+            # Log which tools the agent actually saw — invaluable for
+            # debugging "the LLM didn't call X" without forcing the user
+            # to share their event log.
+            tool_names = [s.get("function", {}).get("name", "?") for s in tool_schemas]
+            await _append_event(db, task_id, "step_start", {
+                "step": "agent_loop",
+                "available_tools": tool_names,
+            })
+            await db.commit()
 
             messages: list[dict] = [
                 {"role": "system", "content": _build_system_prompt(tool_schemas)},
@@ -256,7 +264,13 @@ async def _run_task_loop(task_id: str, user_id: int, prompt: str) -> None:
                 }
                 if tool_schemas:
                     payload["tools"] = tool_schemas
-                    payload["tool_choice"] = "auto"
+                    # Force a tool call on the first turn so GPT-4o doesn't
+                    # bail out with "I can't access your calendar" — even
+                    # when the tool list is in the prompt, the model
+                    # sometimes ignores it under "auto". After the first
+                    # turn we switch to "auto" so the model can synthesize
+                    # a final summary from the tool results.
+                    payload["tool_choice"] = "required" if turn == 0 else "auto"
 
                 resp = await http.post(
                     f"{base_url}/chat/completions",
