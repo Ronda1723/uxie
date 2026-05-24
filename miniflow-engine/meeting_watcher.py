@@ -216,9 +216,10 @@ async def _on_appeared(event: dict) -> None:
 
 
 async def _on_disappeared(event: dict) -> None:
-    """A meeting window just closed. Update the end_ts. If the meeting
-    is currently being recorded, we leave it running — the user
-    explicitly clicked Record and owns Stop."""
+    """A meeting window just closed. Update end_ts. If the meeting is
+    actively recording, finalize it — sitting in a Zoom call after
+    everyone leaves is no reason to keep paying Deepgram, and forgetting
+    to click Stop is a footgun we should remove."""
     detector_key = event.get("detector_key")
     if not detector_key:
         return
@@ -228,6 +229,7 @@ async def _on_disappeared(event: dict) -> None:
 
     import sqlite3
     import meetings
+    import audio_meeting
     now = int(time.time())
     try:
         with meetings._conn() as c:
@@ -237,6 +239,17 @@ async def _on_disappeared(event: dict) -> None:
             )
     except sqlite3.Error as e:
         log.warning(f"watcher end_ts update failed: {e}")
+
+    # Auto-stop the recording if we're the one being recorded. This
+    # only fires when the WATCHER-detected window goes away, so a
+    # user who clicked Record on a calendar-event-detected meeting
+    # is unaffected.
+    if audio_meeting.active_meeting_id() == db_id:
+        log.info(f"auto-stopping recording for meeting {db_id} — window closed")
+        try:
+            await meetings.mark_recording_ended(db_id, "")
+        except Exception as e:
+            log.warning(f"auto-stop failed: {e}")
 
     await _emit("meeting:window-closed", {"id": db_id, "detector_key": detector_key})
     log.info(f"watcher window closed: db_id={db_id}")

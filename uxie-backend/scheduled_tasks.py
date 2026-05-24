@@ -43,7 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import current_user
 from db import SessionLocal, User, get_db
-from db_ios import BackgroundTask, ScheduledTask, TaskEvent
+from db_ios import BackgroundTask, OAuthToken, ScheduledTask, TaskEvent
 from proxy import _llm_base_and_key, get_http
 from settings import get_settings
 
@@ -136,12 +136,21 @@ Style:
 
 
 async def _morning_brief_generate(db: AsyncSession, user: User) -> str:
-    """Run the actual brief generation: fan out to Gmail + Calendar in
-    parallel, hand the results to GPT-4o, return the markdown."""
+    """Run the actual brief generation: fan out to Gmail + Calendar
+    (+ Slack if connected) in parallel, hand the results to GPT-4o,
+    return the markdown."""
     if _connectors is None:
         return "*(connectors not loaded — brief unavailable)*"
 
-    # Parallel fact-finding — each returns a (label, str) tuple.
+    # Detect which providers the user has connected — only fan out to
+    # those, so a Slack-less user doesn't see "(slack not connected)"
+    # smeared across their brief.
+    connected_providers = set(
+        (await db.execute(
+            select(OAuthToken.provider).where(OAuthToken.user_id == user.id)
+        )).scalars().all()
+    )
+
     async def _calendar_today() -> tuple[str, str]:
         try:
             ok, res = await _connectors.execute(
@@ -161,14 +170,34 @@ async def _morning_brief_generate(db: AsyncSession, user: User) -> str:
         except Exception as e:
             return ("gmail", f"(gmail fetch failed: {e})")
 
-    results = await asyncio.gather(_calendar_today(), _gmail_recent(), return_exceptions=False)
+    async def _slack_recent() -> tuple[str, str]:
+        # Slack's search.messages doesn't support a "after:24h" filter
+        # but it does sort by recency. We pull recent mentions + DMs
+        # heuristically: search for the user's @-mention. If they've
+        # set their name we'll get richer results in a later release.
+        try:
+            ok, res = await _connectors.execute(
+                db, user.id, "slack_search",
+                {"query": "after:yesterday is:unread"},
+            )
+            return ("slack", res if isinstance(res, str) else json.dumps(res, default=str))
+        except Exception as e:
+            return ("slack", f"(slack fetch failed: {e})")
+
+    tasks = [_calendar_today(), _gmail_recent()]
+    if "slack" in connected_providers:
+        tasks.append(_slack_recent())
+    results = await asyncio.gather(*tasks, return_exceptions=False)
     sections = {label: text for label, text in results}
 
-    user_msg = (
-        f"# Raw inputs for Morning Brief — {datetime.now(_tz.utc).strftime('%A %B %-d')}\n\n"
-        f"## Calendar (next 24h, primary calendar)\n{sections.get('calendar', '(none)')}\n\n"
-        f"## Unread Gmail (last 24h)\n{sections.get('gmail', '(none)')}\n"
-    )
+    parts = [
+        f"# Raw inputs for Morning Brief — {datetime.now(_tz.utc).strftime('%A %B %-d')}\n",
+        f"## Calendar (next 24h, primary calendar)\n{sections.get('calendar', '(none)')}\n",
+        f"## Unread Gmail (last 24h)\n{sections.get('gmail', '(none)')}\n",
+    ]
+    if "slack" in sections:
+        parts.append(f"## Slack unread / mentions (last 24h)\n{sections['slack']}\n")
+    user_msg = "\n".join(parts)
 
     base_url, api_key = _llm_base_and_key("openai")
     http = get_http()

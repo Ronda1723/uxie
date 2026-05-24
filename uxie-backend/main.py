@@ -214,6 +214,13 @@ app.add_api_route(
     name="oauth_google_callback",
 )
 
+# /oauth/slack/* — same shape as Google. Requires SLACK_CLIENT_ID +
+# SLACK_CLIENT_SECRET env vars on Railway; start endpoint 500s clearly
+# if either is missing.
+import oauth_slack as _oauth_slack  # noqa: E402
+app.add_api_route("/oauth/slack/start",    _oauth_slack.start,    methods=["GET"])
+app.add_api_route("/oauth/slack/callback", _oauth_slack.callback, methods=["GET"], name="oauth_slack_callback")
+
 # /user/connections — list providers the user has connected (used by iOS Connectors UI)
 import connectors as _connectors_pkg  # noqa: E402
 from auth import current_user as _current_user  # noqa: E402

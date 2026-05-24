@@ -209,9 +209,9 @@ def start_oauth(provider: str) -> str:
     UI opens this in the system browser. After Google accepts, Railway
     redirects back to http://localhost:8765/oauth/{provider}/done, which
     our local FastAPI server serves (and broadcasts oauth-connected on)."""
-    if provider not in {"google"}:
+    if provider not in {"google", "slack"}:
         raise ValueError(
-            f"OAuth for '{provider}' isn't routed through Railway yet — only Google is supported"
+            f"OAuth for '{provider}' isn't routed through Railway yet — only Google and Slack are supported"
         )
     jwt = config.get_jwt()
     if not jwt:
