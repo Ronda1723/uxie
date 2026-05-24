@@ -106,6 +106,12 @@ def _is_due(st: ScheduledTask, now: datetime) -> bool:
 # ── Morning Brief generator ───────────────────────────────────────────────────
 
 
+# ── Template registry ────────────────────────────────────────────────────────
+# Each template kind maps to (system_prompt, async_generator). Adding a
+# new workflow = add an entry below + a generator function. The cron
+# worker + endpoint validation read from this same dict.
+
+
 _MORNING_BRIEF_SYSTEM_PROMPT = """You are Uxie's Morning Brief writer. You've been handed the results of
 parallel fact-finding agents: today's calendar, unread Gmail, and any
 notable Drive activity. Synthesize them into a tight Markdown brief the
@@ -220,6 +226,197 @@ async def _morning_brief_generate(db: AsyncSession, user: User) -> str:
     return ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
 
 
+# ── Evening recap generator ───────────────────────────────────────────────────
+
+
+_EVENING_RECAP_SYSTEM_PROMPT = """You're Uxie's End-of-Day Recap writer. Summarize what the user
+actually got done today based on the inputs below — emails they sent,
+meetings they attended, Slack threads they replied in. Tone: a friendly
+chief-of-staff reflecting back. The user reads this winding down.
+
+Structure (omit empty sections):
+
+## What you shipped
+Action-oriented bullets — emails sent, decisions made, calls had.
+
+## Things still open
+Threads you replied to that need follow-up, meetings whose notes you
+haven't written, tasks that came up but didn't close.
+
+## Tomorrow's setup
+One or two lines: what's on the calendar, what you should think about
+overnight.
+
+Style: terse, end with one observation, no closing pleasantry.
+"""
+
+
+async def _evening_recap_generate(db: AsyncSession, user: User) -> str:
+    """Fan out to find what the user DID today — sent emails, calendar
+    events that already happened, etc. Same shape as Morning Brief but
+    backwards-looking."""
+    if _connectors is None:
+        return "*(connectors not loaded)*"
+
+    connected_providers = set(
+        (await db.execute(
+            select(OAuthToken.provider).where(OAuthToken.user_id == user.id)
+        )).scalars().all()
+    )
+
+    async def _sent_today() -> tuple[str, str]:
+        try:
+            ok, res = await _connectors.execute(
+                db, user.id, "gmail_search",
+                {"query": "from:me newer_than:1d", "limit": 15},
+            )
+            return ("sent", res if isinstance(res, str) else json.dumps(res, default=str))
+        except Exception as e:
+            return ("sent", f"(gmail-sent fetch failed: {e})")
+
+    async def _calendar_done() -> tuple[str, str]:
+        # Slight hack — list_events looks forward, but listing the next
+        # 24h captures most of today's already-happened events too on
+        # late-evening runs. For a clean "what happened today" pull,
+        # we'd want a backwards-looking variant.
+        try:
+            ok, res = await _connectors.execute(
+                db, user.id, "calendar_list_events", {"days_ahead": 1}
+            )
+            return ("calendar", res if isinstance(res, str) else json.dumps(res, default=str))
+        except Exception as e:
+            return ("calendar", f"(calendar fetch failed: {e})")
+
+    tasks = [_sent_today(), _calendar_done()]
+    results = await asyncio.gather(*tasks, return_exceptions=False)
+    sections = dict(results)
+
+    user_msg = (
+        f"# Raw inputs for End-of-Day Recap — {datetime.now(_tz.utc).strftime('%A %B %-d')}\n\n"
+        f"## Emails I sent today\n{sections.get('sent', '(none)')}\n\n"
+        f"## Calendar context\n{sections.get('calendar', '(none)')}\n"
+    )
+
+    base_url, api_key = _llm_base_and_key("openai")
+    resp = await get_http().post(
+        f"{base_url}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": "gpt-4o", "temperature": 0.3,
+            "messages": [
+                {"role": "system", "content": _EVENING_RECAP_SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+        },
+        timeout=90,
+    )
+    if resp.status_code != 200:
+        return f"*(LLM call failed: {resp.status_code})*"
+    return ((resp.json().get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+
+
+# ── Weekly digest generator ───────────────────────────────────────────────────
+
+
+_WEEKLY_DIGEST_SYSTEM_PROMPT = """You're Uxie's Weekly Digest writer. The user has reached the end of
+their work week and wants a summary they can paste into a status post,
+share with their manager, or just journal away. Inputs: a week of sent
+emails + a week of calendar events.
+
+Structure:
+
+## This week, you …
+Three or four bullets. The big themes — what got built, who you talked
+to, what shipped. No filler.
+
+## Standout meetings
+Up to three meetings worth remembering. Title + 1-line "what came out
+of it".
+
+## What's open going into next week
+The threads / decisions / asks that didn't close. So Monday-you knows
+where to pick up.
+
+Style: confident, terse, written for sharing. No closing line.
+"""
+
+
+async def _weekly_digest_generate(db: AsyncSession, user: User) -> str:
+    """Past-7-day summary across emails + calendar."""
+    if _connectors is None:
+        return "*(connectors not loaded)*"
+
+    async def _sent_week() -> tuple[str, str]:
+        try:
+            ok, res = await _connectors.execute(
+                db, user.id, "gmail_search",
+                {"query": "from:me newer_than:7d", "limit": 30},
+            )
+            return ("sent", res if isinstance(res, str) else json.dumps(res, default=str))
+        except Exception as e:
+            return ("sent", f"(gmail fetch failed: {e})")
+
+    async def _calendar_week() -> tuple[str, str]:
+        try:
+            ok, res = await _connectors.execute(
+                db, user.id, "calendar_list_events", {"days_ahead": 7}
+            )
+            return ("calendar", res if isinstance(res, str) else json.dumps(res, default=str))
+        except Exception as e:
+            return ("calendar", f"(calendar fetch failed: {e})")
+
+    results = await asyncio.gather(_sent_week(), _calendar_week(), return_exceptions=False)
+    sections = dict(results)
+
+    user_msg = (
+        f"# Raw inputs for Weekly Digest — week ending {datetime.now(_tz.utc).strftime('%A %B %-d')}\n\n"
+        f"## Emails I sent this week\n{sections.get('sent', '(none)')}\n\n"
+        f"## Meetings this week\n{sections.get('calendar', '(none)')}\n"
+    )
+
+    base_url, api_key = _llm_base_and_key("openai")
+    resp = await get_http().post(
+        f"{base_url}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": "gpt-4o", "temperature": 0.3,
+            "messages": [
+                {"role": "system", "content": _WEEKLY_DIGEST_SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+        },
+        timeout=90,
+    )
+    if resp.status_code != 200:
+        return f"*(LLM call failed: {resp.status_code})*"
+    return ((resp.json().get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+
+
+# ── Registry ──────────────────────────────────────────────────────────────────
+
+
+TEMPLATE_REGISTRY: dict[str, dict] = {
+    "morning_brief": {
+        "label": "Morning Brief",
+        "description": "Today's calendar + unread Gmail (+ Slack), synthesized.",
+        "default_time": "08:00",
+        "generator": _morning_brief_generate,
+    },
+    "evening_recap": {
+        "label": "End-of-Day Recap",
+        "description": "What you shipped today, what's still open, tomorrow's setup.",
+        "default_time": "18:00",
+        "generator": _evening_recap_generate,
+    },
+    "weekly_digest": {
+        "label": "Weekly Digest",
+        "description": "Your week in three bullets — themes, meetings, open threads.",
+        "default_time": "17:00",
+        "generator": _weekly_digest_generate,
+    },
+}
+
+
 # ── Email delivery (Resend) ───────────────────────────────────────────────────
 
 
@@ -289,12 +486,13 @@ async def _fire(st_id: str) -> None:
         st.updated_at = datetime.now(_tz.utc)
         await db.commit()
 
-        # 2. Run the kind-specific generator.
+        # 2. Run the kind-specific generator from the template registry.
         try:
-            if st.kind == "morning_brief":
-                brief = await _morning_brief_generate(db, user)
-            else:
+            tpl = TEMPLATE_REGISTRY.get(st.kind)
+            if tpl is None:
                 brief = f"*(unknown scheduled task kind: {st.kind})*"
+            else:
+                brief = await tpl["generator"](db, user)
         except Exception as e:
             _log.exception("scheduled task %s generator failed", st_id)
             brief = f"*(generator error: {e})*"
@@ -316,7 +514,8 @@ async def _fire(st_id: str) -> None:
         # 4. Email if configured.
         delivery = st.delivery_json or {}
         if delivery.get("email", True):
-            subject = "Your Uxie Morning Brief — " + datetime.now(_tz.utc).strftime("%A %B %-d")
+            label = (TEMPLATE_REGISTRY.get(st.kind) or {}).get("label", st.kind)
+            subject = f"Your Uxie {label} — " + datetime.now(_tz.utc).strftime("%A %B %-d")
             await _send_email(user.email, subject, brief)
 
 
@@ -403,8 +602,8 @@ async def scheduled_create(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(current_user),
 ):
-    if body.kind not in {"morning_brief"}:
-        raise HTTPException(400, f"unsupported kind: {body.kind}")
+    if body.kind not in TEMPLATE_REGISTRY:
+        raise HTTPException(400, f"unsupported kind: {body.kind} (try {list(TEMPLATE_REGISTRY)})")
     # Validate run_time_local "HH:MM" shape.
     try:
         hh, mm = body.run_time_local.split(":")

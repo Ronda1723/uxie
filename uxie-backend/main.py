@@ -14,12 +14,32 @@ Endpoints:
 """
 
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
+
+# Sentry — wire BEFORE any FastAPI app is instantiated so the
+# integration's middleware hooks fire on every request. DSN from env
+# var so we can keep the same code path in dev (no env var → no-op).
+_SENTRY_DSN = os.getenv("SENTRY_DSN", "").strip()
+if _SENTRY_DSN:
+    import sentry_sdk
+    sentry_sdk.init(
+        dsn=_SENTRY_DSN,
+        # Don't pay for performance traces yet — error reporting only.
+        # Bump these knobs once we know the volume.
+        traces_sample_rate=0.0,
+        profiles_sample_rate=0.0,
+        # Don't auto-attach user emails / IPs; we'll set user context
+        # explicitly per-request via current_user dependency.
+        send_default_pii=False,
+        environment=os.getenv("RAILWAY_ENVIRONMENT", "production"),
+        release=os.getenv("RAILWAY_GIT_COMMIT_SHA", "unknown")[:7],
+    )
 
 import admin
 import auth
