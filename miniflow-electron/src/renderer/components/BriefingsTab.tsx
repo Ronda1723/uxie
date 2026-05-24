@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 
 type Schedule = {
   id: string;
-  kind: "morning_brief" | string;
+  kind: string;
   enabled: boolean;
   run_time_local: string;   // "HH:MM"
   timezone: string;
@@ -15,7 +15,40 @@ type Schedule = {
 
 const w = window as any;
 
-const COMMON_TIMES = ["07:00", "07:30", "08:00", "08:30", "09:00", "09:30", "10:00"];
+type TemplateDef = {
+  kind: string;
+  label: string;
+  description: string;
+  default_time: string;
+  default_times: string[];
+};
+
+// Three templates baked into the client. Adding a fourth requires only
+// (a) a new generator on the backend, (b) a new entry here. The backend
+// TEMPLATE_REGISTRY is the source of truth for what's valid.
+const TEMPLATES: TemplateDef[] = [
+  {
+    kind: "morning_brief",
+    label: "Morning Brief",
+    description: "Today's calendar + unread Gmail (+ Slack if connected), synthesized into a one-screen brief.",
+    default_time: "08:00",
+    default_times: ["07:00", "07:30", "08:00", "08:30", "09:00", "09:30", "10:00"],
+  },
+  {
+    kind: "evening_recap",
+    label: "End-of-Day Recap",
+    description: "What you shipped today, what's still open, and tomorrow's setup. A friendly chief-of-staff reflecting back.",
+    default_time: "18:00",
+    default_times: ["17:00", "17:30", "18:00", "18:30", "19:00"],
+  },
+  {
+    kind: "weekly_digest",
+    label: "Weekly Digest",
+    description: "Your week in three bullets — themes, standout meetings, and what's open going into next week. Ship-shape for a status post.",
+    default_time: "17:00",
+    default_times: ["16:00", "17:00", "18:00"],
+  },
+];
 
 function detectTimezone(): string {
   try {
@@ -78,17 +111,24 @@ export function BriefingsTab() {
     return () => window.clearInterval(interval);
   }, [refresh]);
 
-  const morning = schedules.find((s) => s.kind === "morning_brief") ?? null;
-
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "auto" }}>
       <div style={{ padding: "20px 24px", maxWidth: 720 }}>
         <h1 style={{ fontSize: 22, marginBottom: 4 }}>Briefings</h1>
         <p className="info-msg" style={{ marginBottom: 24, fontSize: 13, color: "#666" }}>
-          Uxie wakes up before you do, scans your inbox + calendar, and delivers a one-screen brief — as a macOS notification and an email.
+          Recurring agent workflows. Uxie runs these on a schedule, scans your connected providers, and delivers a synthesized brief as a macOS notification and/or email.
         </p>
 
-        <MorningBriefCard schedule={morning} onChanged={refresh} />
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {TEMPLATES.map((tpl) => (
+            <TemplateCard
+              key={tpl.kind}
+              tpl={tpl}
+              schedule={schedules.find((s) => s.kind === tpl.kind) ?? null}
+              onChanged={refresh}
+            />
+          ))}
+        </div>
 
         {lastBrief && (
           <section style={{ marginTop: 32 }}>
@@ -108,21 +148,22 @@ export function BriefingsTab() {
   );
 }
 
-function MorningBriefCard({
-  schedule, onChanged,
+function TemplateCard({
+  tpl, schedule, onChanged,
 }: {
+  tpl: TemplateDef;
   schedule: Schedule | null;
   onChanged: () => void;
 }) {
-  const [time, setTime] = useState(schedule?.run_time_local ?? "08:00");
+  const [time, setTime] = useState(schedule?.run_time_local ?? tpl.default_time);
   const [tz, setTz] = useState(schedule?.timezone ?? detectTimezone());
   const [enabled, setEnabled] = useState(schedule?.enabled ?? true);
   const [emailEnabled, setEmailEnabled] = useState(schedule?.delivery?.email ?? true);
   const [notifyEnabled, setNotifyEnabled] = useState(schedule?.delivery?.notification ?? true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(!!schedule);
 
-  // Sync local state when the row changes from polling.
   useEffect(() => {
     if (!schedule) return;
     setTime(schedule.run_time_local);
@@ -130,12 +171,12 @@ function MorningBriefCard({
     setEnabled(schedule.enabled);
     setEmailEnabled(schedule.delivery?.email ?? true);
     setNotifyEnabled(schedule.delivery?.notification ?? true);
+    setExpanded(true);
   }, [schedule?.id, schedule?.run_time_local, schedule?.timezone, schedule?.enabled,
       schedule?.delivery?.email, schedule?.delivery?.notification]);
 
   async function save() {
-    setBusy(true);
-    setError(null);
+    setBusy(true); setError(null);
     try {
       const delivery = { email: emailEnabled, notification: notifyEnabled };
       if (schedule) {
@@ -144,110 +185,123 @@ function MorningBriefCard({
         });
       } else {
         const r = await w.miniflow.createSchedule({
-          kind: "morning_brief",
-          run_time_local: time, timezone: tz, enabled, delivery,
+          kind: tpl.kind, run_time_local: time, timezone: tz, enabled, delivery,
         });
         if (r?.error) setError(r.error);
       }
       onChanged();
     } catch (e: any) {
       setError(String(e?.message ?? e));
-    } finally {
-      setBusy(false);
-    }
+    } finally { setBusy(false); }
   }
 
   async function fireNow() {
     if (!schedule) return;
-    setBusy(true);
-    setError(null);
+    setBusy(true); setError(null);
     try {
       await w.miniflow.fireSchedule(schedule.id);
-      // Give the cron a moment to start, then refresh.
       window.setTimeout(onChanged, 1500);
     } catch (e: any) {
       setError(String(e?.message ?? e));
-    } finally {
-      setBusy(false);
-    }
+    } finally { setBusy(false); }
   }
 
   async function remove() {
     if (!schedule) return;
-    if (!confirm("Delete the morning brief schedule?")) return;
+    if (!confirm(`Delete the ${tpl.label} schedule?`)) return;
     setBusy(true);
     try {
       await w.miniflow.deleteSchedule(schedule.id);
       onChanged();
-    } finally {
-      setBusy(false);
-    }
+    } finally { setBusy(false); }
   }
 
   return (
     <div style={card}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-        <h2 style={{ fontSize: 16, margin: 0 }}>Morning Brief</h2>
-        <label style={{ fontSize: 12, color: "#666", display: "flex", alignItems: "center", gap: 6 }}>
-          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-          <span>Enabled</span>
-        </label>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
+        <div style={{ flex: 1 }}>
+          <h2 style={{ fontSize: 15, margin: 0 }}>{tpl.label}</h2>
+          <p style={{ marginTop: 6, fontSize: 12, color: "#666", lineHeight: 1.5 }}>
+            {tpl.description}
+          </p>
+        </div>
+        {schedule
+          ? <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 10,
+                            background: schedule.enabled ? "#3a8c6a22" : "#5b687822",
+                            color: schedule.enabled ? "#3a8c6a" : "#5b6878",
+                            fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.04 }}>
+              {schedule.enabled ? "Active" : "Paused"}
+            </span>
+          : <button onClick={() => setExpanded(!expanded)} style={chipBtn}>
+              {expanded ? "Cancel" : "Set up"}
+            </button>}
       </div>
-      <p style={{ marginTop: 8, fontSize: 12, color: "#666", lineHeight: 1.5 }}>
-        Every morning, Uxie scans your calendar + unread Gmail and synthesizes a one-screen Markdown brief — today's schedule, inbox highlights, and anything you should know about.
-      </p>
 
-      <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "12px 16px", marginTop: 16 }}>
-        <label style={fieldLabel}>Send at</label>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <input
-            type="time"
-            value={time}
-            onChange={(e) => setTime(e.target.value)}
-            style={{ ...input, width: 110 }}
-          />
-          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-            {COMMON_TIMES.map((t) => (
-              <button key={t} onClick={() => setTime(t)} style={chipBtn}>{t}</button>
-            ))}
+      {expanded && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "12px 16px", marginTop: 16 }}>
+            <label style={fieldLabel}>Send at</label>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <input
+                type="time"
+                value={time}
+                onChange={(e) => setTime(e.target.value)}
+                style={{ ...input, width: 110 }}
+              />
+              <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                {tpl.default_times.map((t) => (
+                  <button key={t} onClick={() => setTime(t)} style={chipBtn}>{t}</button>
+                ))}
+              </div>
+            </div>
+
+            <label style={fieldLabel}>Timezone</label>
+            <input value={tz} onChange={(e) => setTz(e.target.value)} style={input}
+                   placeholder="e.g. Asia/Kolkata" />
+
+            <label style={fieldLabel}>Deliver as</label>
+            <div style={{ display: "flex", gap: 16 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+                <input type="checkbox" checked={notifyEnabled}
+                       onChange={(e) => setNotifyEnabled(e.target.checked)} />
+                Notification
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+                <input type="checkbox" checked={emailEnabled}
+                       onChange={(e) => setEmailEnabled(e.target.checked)} />
+                Email
+              </label>
+              {schedule && (
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, marginLeft: "auto" }}>
+                  <input type="checkbox" checked={enabled}
+                         onChange={(e) => setEnabled(e.target.checked)} />
+                  Enabled
+                </label>
+              )}
+            </div>
           </div>
-        </div>
 
-        <label style={fieldLabel}>Timezone</label>
-        <input value={tz} onChange={(e) => setTz(e.target.value)} style={input} placeholder="e.g. Asia/Kolkata" />
+          <div style={{ marginTop: 16, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <button onClick={save} disabled={busy} style={btnPrimary}>
+              {schedule ? "Save changes" : `Set up ${tpl.label}`}
+            </button>
+            {schedule && (
+              <>
+                <button onClick={fireNow} disabled={busy} style={btnSecondary}>Send now</button>
+                <button onClick={remove} disabled={busy} style={btnDanger}>Delete</button>
+              </>
+            )}
+            {schedule && (
+              <span style={{ marginLeft: "auto", fontSize: 11, color: "#888" }}>
+                Last fired: {formatLastFired(schedule.last_fired_at)}
+              </span>
+            )}
+          </div>
 
-        <label style={fieldLabel}>Deliver as</label>
-        <div style={{ display: "flex", gap: 16 }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-            <input type="checkbox" checked={notifyEnabled} onChange={(e) => setNotifyEnabled(e.target.checked)} />
-            macOS notification
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-            <input type="checkbox" checked={emailEnabled} onChange={(e) => setEmailEnabled(e.target.checked)} />
-            Email to your Uxie account
-          </label>
-        </div>
-      </div>
-
-      <div style={{ marginTop: 16, display: "flex", gap: 8, alignItems: "center" }}>
-        <button onClick={save} disabled={busy} style={btnPrimary}>
-          {schedule ? "Save changes" : "Set up morning brief"}
-        </button>
-        {schedule && (
-          <>
-            <button onClick={fireNow} disabled={busy} style={btnSecondary}>Send brief now</button>
-            <button onClick={remove} disabled={busy} style={btnDanger}>Delete</button>
-          </>
-        )}
-        {schedule && (
-          <span style={{ marginLeft: "auto", fontSize: 11, color: "#888" }}>
-            Last fired: {formatLastFired(schedule.last_fired_at)}
-          </span>
-        )}
-      </div>
-
-      {error && (
-        <div style={{ marginTop: 12, color: "#d44a4a", fontSize: 12 }}>{error}</div>
+          {error && (
+            <div style={{ marginTop: 12, color: "#d44a4a", fontSize: 12 }}>{error}</div>
+          )}
+        </>
       )}
     </div>
   );

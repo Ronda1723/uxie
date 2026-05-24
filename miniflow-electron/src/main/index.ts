@@ -1,5 +1,16 @@
 // Electron main process entry point.
 
+// Sentry MUST init before anything else — that way crashes during the
+// remaining imports get captured. DSN is baked in (public credential);
+// no env-var fallback needed for the Electron side.
+import * as Sentry from "@sentry/electron/main";
+Sentry.init({
+  dsn: "https://00f89f3065c24859d2691ccdecd409ec@o4511445819719680.ingest.us.sentry.io/4511445840232448",
+  tracesSampleRate: 0,    // error reporting only for now
+  // Skip auto-PII; we set user context per-session explicitly if at all.
+  sendDefaultPii: false,
+});
+
 import * as electronNS from "electron";
 import { powerMonitor } from "electron";
 import fs from "node:fs";

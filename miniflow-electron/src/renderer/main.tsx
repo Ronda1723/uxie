@@ -1,3 +1,6 @@
+import * as Sentry from "@sentry/electron/renderer";
+Sentry.init({});  // shares DSN + config with the main-process init
+
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
@@ -8,7 +11,10 @@ class ErrorBoundary extends React.Component<
 > {
   state = { err: null as Error | null };
   static getDerivedStateFromError(err: Error) { return { err }; }
-  componentDidCatch(err: Error, info: unknown) { console.error("[renderer]", err, info); }
+  componentDidCatch(err: Error, info: unknown) {
+    console.error("[renderer]", err, info);
+    Sentry.captureException(err, { extra: { info } });
+  }
   render() {
     if (this.state.err) {
       const err = this.state.err as Error;

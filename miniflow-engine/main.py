@@ -48,6 +48,28 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
+# Sentry — DSN baked in for the packaged DMG (it's a public credential).
+# Override-able via SENTRY_DSN env var for dev / staging. Wire BEFORE
+# importing any other engine modules so unhandled errors during their
+# import time are reported.
+_SENTRY_DSN = os.getenv(
+    "SENTRY_DSN",
+    "https://ea0c1c17aa52e2194f863903a36d0ef8@o4511445819719680.ingest.us.sentry.io/4511445861728256",
+).strip()
+if _SENTRY_DSN:
+    try:
+        import sentry_sdk
+        sentry_sdk.init(
+            dsn=_SENTRY_DSN,
+            traces_sample_rate=0.0,
+            profiles_sample_rate=0.0,
+            send_default_pii=False,
+            environment="production" if getattr(sys, "frozen", False) else "dev",
+        )
+    except Exception:
+        # Sentry init failure must NEVER crash the engine.
+        pass
+
 import config
 import agent
 import audio
