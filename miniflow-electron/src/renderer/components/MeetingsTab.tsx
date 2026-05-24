@@ -13,6 +13,8 @@ type Meeting = {
   transcript: string;
   user_notes: string;
   structured_notes: string;
+  audio_path: string | null;       // local WAV file path; null if no audio captured
+  audio_size_bytes: number;
   created_at: number;
   updated_at: number;
 };
@@ -398,6 +400,10 @@ function MeetingDetail({
         </a>
       )}
 
+      {meeting.audio_path && (
+        <AudioPlayer path={meeting.audio_path} sizeBytes={meeting.audio_size_bytes} />
+      )}
+
       <section style={{ marginTop: 20, display: "flex", gap: 8, flexWrap: "wrap" }}>
         {meeting.status === "detected" && (
           <>
@@ -460,6 +466,36 @@ function MeetingDetail({
         </p>
       )}
     </div>
+  );
+}
+
+function AudioPlayer({ path, sizeBytes }: { path: string; sizeBytes: number }) {
+  // Use file:// URL so the renderer's <audio> tag can stream the WAV
+  // straight off disk. Electron's renderer is permitted to load file://
+  // URLs since our webPreferences don't sandbox file access for the
+  // popover. (We were already serving the renderer from file:// in
+  // packaged builds, so this is consistent.)
+  const fileUrl = "file://" + encodeURI(path);
+  const sizeMb = sizeBytes / (1024 * 1024);
+  return (
+    <section style={{ marginTop: 24 }}>
+      <h3 style={sectionLabel}>Audio</h3>
+      <audio
+        controls
+        preload="metadata"
+        src={fileUrl}
+        style={{ width: "100%", maxWidth: 560 }}
+      />
+      <div style={{ marginTop: 6, fontSize: 11, color: "#888", display: "flex", gap: 12 }}>
+        <span>{sizeMb.toFixed(1)} MB</span>
+        <button
+          onClick={() => w.miniflow.openExternal("file://" + encodeURI(path.split("/").slice(0, -1).join("/") + "/"))}
+          style={{ background: "transparent", border: "none", color: "#3367d6", cursor: "pointer", padding: 0, fontSize: 11 }}
+        >
+          Show in Finder
+        </button>
+      </div>
+    </section>
   );
 }
 

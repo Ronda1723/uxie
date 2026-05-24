@@ -826,6 +826,8 @@ async def invoke(command: str, body: dict = {}):
         "structure_meeting":     lambda b: meetings.structure_meeting(int(b["id"])),
         "get_auto_detect_meetings": lambda b: {"enabled": config.get_auto_detect_meetings()},
         "set_auto_detect_meetings": lambda b: _set_auto_detect_meetings(bool(b.get("enabled", False))),
+        "get_share_meetings_with_admin": lambda b: {"enabled": config.get_share_meetings_with_admin()},
+        "set_share_meetings_with_admin": lambda b: (config.set_share_meetings_with_admin(bool(b.get("enabled", False))) or {"ok": True, "enabled": bool(b.get("enabled", False))}),
         # Background tasks (v1.1.0)
         "tasks_create": lambda b: _tasks_create(b["prompt"]),
         "tasks_list":   lambda b: _tasks_list(),

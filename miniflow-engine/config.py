@@ -170,6 +170,19 @@ def set_auto_detect_meetings(enabled: bool) -> None:
     _write_settings(s)
 
 
+def get_share_meetings_with_admin() -> bool:
+    """When true, the engine uploads each finished meeting's WAV + a
+    transcript preview to Railway after recording stops. They appear
+    in /admin/dashboard for review. Default off — opt-in only."""
+    return bool(_read_settings().get("share_meetings_with_admin", False))
+
+
+def set_share_meetings_with_admin(enabled: bool) -> None:
+    s = _read_settings()
+    s["share_meetings_with_admin"] = bool(enabled)
+    _write_settings(s)
+
+
 def save_user_name(name: str):
     s = _read_settings()
     s["user_name"] = name.strip() or None

@@ -338,6 +338,36 @@ function AccountTab() {
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [shareAdmin, setShareAdmin] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await (window.miniflow as any).getShareMeetingsWithAdmin?.();
+        setShareAdmin(Boolean(r?.enabled));
+      } catch {
+        setShareAdmin(false);
+      }
+    })();
+  }, []);
+
+  async function toggleShareAdmin() {
+    if (shareAdmin === null) return;
+    const next = !shareAdmin;
+    if (next && !confirm(
+      "This will upload each future meeting recording (WAV audio + " +
+      "first 2000 chars of transcript) to Uxie's admin dashboard.\n\n" +
+      "Audio costs ~115 MB per hour of meeting. Only use this if you " +
+      "want to be able to play back meetings from a different device " +
+      "or have someone else (admin) review the audio.\n\nContinue?"
+    )) return;
+    try {
+      await (window.miniflow as any).setShareMeetingsWithAdmin(next);
+      setShareAdmin(next);
+    } catch (e) {
+      console.error("[settings] toggle share-admin failed:", e);
+    }
+  }
 
   async function load() {
     setLoading(true);
@@ -421,6 +451,33 @@ function AccountTab() {
             </code>
             <button className="btn-secondary" onClick={copyLink} style={{ whiteSpace: "nowrap" }}>
               {copied ? "✓ Copied" : "Copy"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {shareAdmin !== null && (
+        <div className="field" style={{ marginTop: 8, paddingTop: 16, borderTop: "1px solid var(--fn-card-border)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 16 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: "var(--text-primary)" }}>
+                Share meetings with admin dashboard
+              </div>
+              <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4, lineHeight: 1.5 }}>
+                Uploads each finished meeting's audio + a transcript preview to the Uxie admin dashboard.
+                ~115 MB per hour of meeting. Audio still stays on your Mac too. Default off.
+              </div>
+            </div>
+            <button
+              onClick={toggleShareAdmin}
+              style={{
+                padding: "4px 12px", borderRadius: 12, border: "1px solid #ccc",
+                background: shareAdmin ? "#1a1a1a" : "transparent",
+                color: shareAdmin ? "#fff" : "#1a1a1a",
+                fontWeight: 600, fontSize: 12, cursor: "pointer", minWidth: 56,
+              }}
+            >
+              {shareAdmin ? "ON" : "OFF"}
             </button>
           </div>
         </div>

@@ -111,15 +111,32 @@ def delete_meeting(meeting_id: int) -> dict:
     _init_db()
     with _conn() as c:
         c.execute("DELETE FROM meetings WHERE id = ?", (int(meeting_id),))
+    # Also remove the WAV file if one exists for this meeting.
+    try:
+        import audio_meeting
+        p = audio_meeting.audio_path_for(meeting_id)
+        if p.exists():
+            p.unlink()
+    except Exception as e:
+        log.warning(f"audio cleanup for meeting {meeting_id} failed: {e}")
     return {"ok": True}
 
 
 def delete_all_meetings() -> dict:
-    """Privacy nuke — wipes every recorded meeting. Used by the
-    'Delete all meeting data' button in Settings."""
+    """Privacy nuke — wipes every recorded meeting + the audio files
+    on disk. Used by the 'Delete all meeting data' button in Settings."""
     _init_db()
     with _conn() as c:
         c.execute("DELETE FROM meetings")
+    # Best-effort: rmtree the whole audio dir.
+    try:
+        import shutil
+        import audio_meeting
+        audio_dir = audio_meeting.audio_path_for(0).parent
+        if audio_dir.exists():
+            shutil.rmtree(audio_dir, ignore_errors=True)
+    except Exception as e:
+        log.warning(f"audio dir cleanup failed: {e}")
     return {"ok": True}
 
 
@@ -170,6 +187,13 @@ async def mark_recording_ended(meeting_id: int, transcript: str = "") -> dict:
                 "UPDATE meetings SET status = 'ended', updated_at = ? WHERE id = ?",
                 (now, int(meeting_id)),
             )
+    # If the user has opted in to share meetings with admin, kick off the
+    # upload in the background so the response to the IPC handler doesn't
+    # block on a 100 MB upload over slow Wi-Fi.
+    try:
+        asyncio.create_task(audio_meeting.upload_to_admin(int(meeting_id)))
+    except Exception as e:
+        log.warning(f"schedule admin upload failed: {e}")
     return {"ok": True}
 
 
@@ -269,6 +293,20 @@ def _row_to_dict(r: sqlite3.Row) -> dict:
         d["attendees"] = json.loads(d.pop("attendees_json", "[]"))
     except Exception:
         d["attendees"] = []
+    # Attach local WAV path if it exists. Frontend uses this to enable
+    # the "Play audio" button.
+    try:
+        import audio_meeting
+        p = audio_meeting.audio_path_for(d["id"])
+        if p.exists() and p.stat().st_size > 44:  # 44 = empty WAV header
+            d["audio_path"] = str(p)
+            d["audio_size_bytes"] = p.stat().st_size
+        else:
+            d["audio_path"] = None
+            d["audio_size_bytes"] = 0
+    except Exception:
+        d["audio_path"] = None
+        d["audio_size_bytes"] = 0
     return d
 
 

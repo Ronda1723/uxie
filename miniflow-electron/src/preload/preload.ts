@@ -173,6 +173,8 @@ const api = {
   structureMeeting:    (id: number) => ipcRenderer.invoke("meetings:structure", id),
   getAutoDetectMeetings: () => ipcRenderer.invoke("meetings:getAutoDetect"),
   setAutoDetectMeetings: (enabled: boolean) => ipcRenderer.invoke("meetings:setAutoDetect", enabled),
+  getShareMeetingsWithAdmin: () => ipcRenderer.invoke("meetings:getShareAdmin"),
+  setShareMeetingsWithAdmin: (enabled: boolean) => ipcRenderer.invoke("meetings:setShareAdmin", enabled),
 
   // Background tasks (v1.1.0)
   createTask:   (prompt: string) => ipcRenderer.invoke("tasks:create", prompt),

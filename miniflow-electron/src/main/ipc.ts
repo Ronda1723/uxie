@@ -223,6 +223,9 @@ export function registerIpc() {
   ipcMain.handle("meetings:getAutoDetect", () => invoke("get_auto_detect_meetings", {}));
   ipcMain.handle("meetings:setAutoDetect", (_e, enabled: boolean) =>
     invoke("set_auto_detect_meetings", { enabled }));
+  ipcMain.handle("meetings:getShareAdmin", () => invoke("get_share_meetings_with_admin", {}));
+  ipcMain.handle("meetings:setShareAdmin", (_e, enabled: boolean) =>
+    invoke("set_share_meetings_with_admin", { enabled }));
 
   // Background tasks (v1.1.0)
   ipcMain.handle("tasks:create", (_e, prompt: string) => invoke("tasks_create", { prompt }));

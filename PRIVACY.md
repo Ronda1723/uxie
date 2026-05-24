@@ -12,6 +12,10 @@ to see it, and never sell anything.
 **On your device** (`~/miniflow/` on macOS):
 - Dictation transcripts and command history (local SQLite)
 - Meeting transcripts and structured notes (local SQLite at `meetings.db`)
+- **Meeting audio recordings** as `.wav` files at
+  `~/miniflow/meetings_audio/<meeting_id>.wav` (16 kHz mono, ≈115 MB/hour).
+  Kept until you delete the meeting via the Meetings tab or wipe the
+  folder. Never uploaded.
 - OAuth refresh-tokens (macOS Keychain only)
 - App preferences, hotkey config, dictionary entries, snippets
 
@@ -45,7 +49,10 @@ to see it, and never sell anything.
 
 ## What Uxie does NOT collect
 
-- Your speech audio after transcription (discarded immediately)
+- Your speech audio for **voice commands / dictation** (the hotkey-
+  triggered short utterances) — those are discarded after transcription
+  unless you've opted in to debug audio upload via the admin dashboard
+  (R2-only).
 - Your screen contents (we never capture video; meeting recording is
   audio-only)
 - Your keystrokes outside of dictation sessions

@@ -122,20 +122,56 @@ _session: "_Session | None" = None
 _session_lock = asyncio.Lock()
 
 
+_MEETING_AUDIO_DIR = Path.home() / "miniflow" / "meetings_audio"
+
+
+def audio_path_for(meeting_id: int) -> Path:
+    """Deterministic local path for a meeting's audio. WAV (PCM 16-bit
+    mono 16 kHz). Lives alongside the SQLite db at `~/miniflow/`."""
+    return _MEETING_AUDIO_DIR / f"{int(meeting_id)}.wav"
+
+
 class _Session:
     """One active recording. Owns the tap subprocess + Deepgram socket +
-    the asyncio tasks that move bytes between them."""
+    a local WAV writer + the asyncio tasks that move bytes between them."""
     def __init__(self, meeting_id: int) -> None:
+        import wave
         self.meeting_id = meeting_id
         self.proc: asyncio.subprocess.Process | None = None
         self.ws: Any = None
         self.tasks: list[asyncio.Task] = []
         self.stopped = False
 
+        # Open a WAV file alongside the transcript so the user can replay
+        # the audio later. Header is finalized in close() — wave.open
+        # only writes the size field on close, so a force-quit mid-meeting
+        # leaves a broken header. Acceptable: the recording is in process,
+        # we lose at most one session of replay on crash.
+        _MEETING_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+        self.wav_path = audio_path_for(meeting_id)
+        try:
+            self.wav_file = wave.open(str(self.wav_path), "wb")
+            self.wav_file.setnchannels(1)
+            self.wav_file.setsampwidth(2)            # int16
+            self.wav_file.setframerate(_SAMPLE_RATE)  # 16 kHz
+        except Exception as e:
+            log.warning(f"could not open WAV file {self.wav_path}: {e}")
+            self.wav_file = None
+
     async def stop(self) -> None:
         if self.stopped:
             return
         self.stopped = True
+
+        # Finalize the WAV header — wave.open writes size only on close().
+        # Doing this BEFORE we kill the subprocess so a chunk still in
+        # flight doesn't get partially written after the file is sealed.
+        if getattr(self, "wav_file", None) is not None:
+            try:
+                self.wav_file.close()
+                self.wav_file = None
+            except Exception as e:
+                log.warning(f"WAV close failed: {e}")
 
         # 1. Tell Deepgram to flush. The receiver task will pick up the
         #    tail before exiting.
@@ -262,13 +298,67 @@ def active_meeting_id() -> int | None:
     return _session.meeting_id if _session and not _session.stopped else None
 
 
+async def upload_to_admin(meeting_id: int) -> dict:
+    """If the user has opted in via Settings → 'Share meetings with
+    admin', POST the WAV + transcript preview to Railway
+    /meetings/upload. No-op otherwise. Returns {ok|error}.
+
+    Called from `meetings.mark_recording_ended` after the WAV is sealed
+    and the transcript is final."""
+    if not config.get_share_meetings_with_admin():
+        return {"skipped": "share_meetings_with_admin off"}
+
+    import meetings as _meetings
+    m = _meetings.get_meeting(meeting_id)
+    if not m or not m.get("audio_path"):
+        return {"skipped": "no audio file"}
+    wav_path = m["audio_path"]
+    try:
+        with open(wav_path, "rb") as f:
+            wav_bytes = f.read()
+    except OSError as e:
+        log.warning(f"upload_to_admin: read {wav_path} failed: {e}")
+        return {"error": str(e)}
+
+    jwt = config.get_jwt()
+    if not jwt:
+        return {"error": "not signed in"}
+    base = config.get_uxie_backend_url()
+    duration = max(0, int(m.get("end_ts", 0)) - int(m.get("start_ts", 0)))
+    transcript = m.get("transcript") or ""
+
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            r = await client.post(
+                f"{base}/meetings/upload",
+                headers={"Authorization": f"Bearer {jwt}"},
+                files={"audio": (f"meeting-{meeting_id}.wav", wav_bytes, "audio/wav")},
+                data={
+                    "title": m.get("title", "")[:300],
+                    "local_meeting_id": str(int(meeting_id)),
+                    "duration_seconds": str(duration),
+                    "transcript_preview": transcript[:2000],
+                    "structured_notes": (m.get("structured_notes") or "")[:8000],
+                },
+            )
+        if r.status_code == 503:
+            return {"skipped": "R2 not configured on backend"}
+        r.raise_for_status()
+        log.info(f"upload_to_admin: meeting {meeting_id} → R2 key={r.json().get('key')}")
+        return r.json()
+    except httpx.HTTPError as e:
+        log.warning(f"upload_to_admin meeting {meeting_id} failed: {e}")
+        return {"error": str(e)}
+
+
 # ── Pumps ─────────────────────────────────────────────────────────────────────
 
 
 async def _pump_tap_to_deepgram(sess: _Session) -> None:
-    """Read PCM bytes from the tap subprocess, forward to Deepgram. 4 KB
-    ≈ 125 ms at 16 kHz mono int16 — small enough for low transcript
-    latency, large enough to avoid syscall thrash."""
+    """Read PCM bytes from the tap subprocess, fan out to Deepgram AND
+    to the local WAV file. 4 KB ≈ 125 ms at 16 kHz mono int16 — small
+    enough for low transcript latency, large enough to avoid syscall
+    thrash."""
     assert sess.proc is not None and sess.proc.stdout is not None
     try:
         while not sess.stopped:
@@ -276,12 +366,22 @@ async def _pump_tap_to_deepgram(sess: _Session) -> None:
             if not data:
                 log.info("audio_meeting: tap stdout EOF")
                 break
+            # Tee #1: Deepgram for live transcription.
             if sess.ws is not None:
                 try:
                     await sess.ws.send(data)
                 except websockets.exceptions.ConnectionClosed:
                     log.info("audio_meeting: Deepgram closed during send")
                     break
+            # Tee #2: local WAV file for replay. wave.writeframes is sync
+            # but tiny (memcpy + a few syscalls); fine on the asyncio
+            # thread.
+            if sess.wav_file is not None:
+                try:
+                    sess.wav_file.writeframes(data)
+                except Exception as e:
+                    log.warning(f"WAV write failed: {e}")
+                    sess.wav_file = None  # don't keep trying after a fault
     except asyncio.CancelledError:
         raise
     except Exception as e:
