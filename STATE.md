@@ -1,125 +1,111 @@
-# Uxie — Project State (last updated 2026-05-24)
+# Uxie — Project State (last updated 2026-05-24, v1.4.0 final)
 
-Single page summary of where Uxie stands. Read this before resuming work
-after a break — it's faster than scrolling through commits.
+Single page summary of where Uxie stands as the project closed out for
+private beta. Read this before resuming work after a break.
 
-## What ships solidly
+## Scope status — what shipped vs what didn't
 
-### Voice surface
-- Hotkey dictation (`fn` on Mac, Right-Alt on Windows) with grammar
-  cleanup via Groq llama-3.3 / OpenAI gpt-4o
-- Hotkey command mode → agent tool-calling (Gmail, Calendar, Drive, browser)
-- **Text-selection transforms** — select text in any app, hold `fn`, say
-  *"polish this"* / *"make this concise"* / *"translate to Spanish"* —
-  the selection is replaced with the transformed text via clipboard +
-  osascript Cmd+V. Triggered by keyword match in
-  [agent.py::TRANSFORM_KEYWORDS](miniflow-engine/agent.py#L112).
-- **Smart formatting** — bundle-id based context map. Mail.app gets
-  email-shape output; Notes.app gets markdown; everything else gets
-  prose. See [agent.py::APP_CONTEXT_MAP](miniflow-engine/agent.py#L616).
+**Shipped (production-ready for ≤100 testers via Google OAuth Testing mode):**
 
-### Meeting recording (Granola-class)
-- **System-audio + mic capture** via Swift `UxieAudioTap.app` sub-bundle
-  ([native-helper/audio-tap/](native-helper/audio-tap/)). Uses
-  AVCaptureSession (mic) + ScreenCaptureKit (system audio) — verified
-  ~16 kHz mono int16 PCM at real-time rate.
-- **Long-form Deepgram** streaming with `nova-3 + diarize + smart_format`.
-  Finalized utterances appended live to SQLite at `~/miniflow/meetings.db`.
-- **Calendar polling** every 60s detects upcoming events (Gmail OAuth
-  with `calendar.readonly` scope). T-60s notification with Record / Skip
-  action buttons.
-- **Auto-detection** of Slack huddles, Zoom, Teams, Webex, Meet via the
-  same Swift binary in `--watch` mode polling `SCShareableContent` every
-  5s with state-change-only logging.
-- **Structure-this-meeting** button → Railway `/llm/structure-meeting`
-  with per-hour + per-day burst limits → Granola-style markdown summary.
+| Capability | Where | Notes |
+|---|---|---|
+| Voice dictation + grammar cleanup | engine | fn / Right-Alt hotkey, Groq Llama-3.3 grammar pass |
+| Voice agent commands (Gmail / Calendar / Drive / Slack) | engine + Railway | tool-calling via OpenAI gpt-4o |
+| Text-selection transforms (polish / concise / tone / translate) | engine | reads AX selected text, pastes back via clipboard + Cmd+V |
+| App-specific smart formatting (Mail → email, Notes → markdown) | engine | bundle-id → context map |
+| Meeting recording — mic + system audio | Swift sub-bundle | AVCaptureSession + ScreenCaptureKit, real-time 16 kHz mono mix |
+| Long-form Deepgram transcription with diarization | engine | nova-3 + speaker labels |
+| Calendar polling → notification → record/skip | engine + Mac main | 60s poll loop, native macOS notifications |
+| Auto-detection of Slack / Zoom / Teams / Meet / Webex windows | Swift `--watch` mode | `SCShareableContent` poll every 5s, state-change-only logging |
+| Auto-stop recording on call window close | engine | `meeting_watcher._on_disappeared` |
+| Structure-this-meeting (Granola-style summary) | Railway | `/llm/structure-meeting` with per-hour + per-day burst limits |
+| Background agent tasks ("Tasks" tab) | Railway + Mac | detached agent loop, polling UI, JWT-gated |
+| Approval gate for destructive tools | Railway + Mac | `/tasks/{id}/approve` parks the loop on asyncio.Event; inline approval card in Tasks tab |
+| Parallel tool calls | Railway | `asyncio.gather` over all `tool_calls` in a turn |
+| Scheduled / recurring workflows ("Briefings" tab) | Railway cron + Mac | TEMPLATE_REGISTRY with three baked-in templates |
+| **Morning Brief**, **End-of-Day Recap**, **Weekly Digest** | Railway | parallel Gmail + Calendar (+Slack) workers → GPT-4o synthesis → email via Resend + notification |
+| Referral system (link, share, redeem, +30-day Pro reward) | Railway + Mac Settings → Invite tab | |
+| Slack OAuth flow | Railway | parallels Google OAuth; needs `SLACK_CLIENT_ID` + `SLACK_CLIENT_SECRET` env vars |
+| Sentry error reporting | engine + renderer + backend | 3 separate projects under one org |
+| Privacy policy + ToS | repo root (PRIVACY.md, TERMS.md) | markdown; not hosted publicly yet |
+| Auto-update flow | electron-updater | Mac DMG notarized + stapled; Windows EXE built but Authenticode-unsigned |
 
-### Background tasks (v1.1.0)
-- **`Tasks` tab** in left rail. Type a prompt, agent runs on Railway
-  detached from the HTTP request. Polling-based UI (2s while running).
-- Read-only tools: gmail_search/read, calendar_list_events/check_avail,
-  drive_search/read. Send / create / destructive tools NOT yet exposed
-  to background tasks — waiting on the approval-gate flow.
-- `tool_choice: "required"` on turn 0 so GPT-4o can't refuse with
-  "I can't check your calendar".
-- 401/403 errors get translated into "disconnect + reconnect in
-  Settings → Connectors" before the LLM sees them.
+**Deferred — picked up if we ever revive the project:**
 
-### Backend (Railway)
-- FastAPI on `uxie-production.up.railway.app`. Auth = email OTP via
-  Resend → JWT (RS256, 30-day) → stored in macOS Keychain.
-- Routes through Railway: `/llm/chat`, `/llm/stream`, `/llm/structure-meeting`,
-  `/stt/session`, `/tasks/*`, `/oauth/google/*`, `/user/connections`,
-  `/user/connector_token/{provider}`, `/agent/execute` (iOS-shaped).
-- Per-month usage counters + per-hour/day burst limiter (`limits.py::check_burst`).
-- Connector registry with Gmail + Calendar + Drive + Slack tool schemas.
+| Item | Why deferred | Effort to add |
+|---|---|---|
+| Boss + worker decomposition (real multi-agent) | Parallel tool calls cover 80% of the win | 3-4 days |
+| iOS companion app | repo at `uxie-app/uxie-ios`, paused | 2 weeks for parity |
+| Vector memory across meetings + dictations | needs daily-active users first | 1 week |
+| Local LLM option | small addressable market | 3 days |
+| Plugin marketplace | premature | open-ended |
+| Public Google OAuth verification | needs domain + landing page + demo video | 4-6 weeks elapsed (Google review) |
+| Stripe billing | Pro tier is hypothetical until paying customers ask | 3-4 days |
+| Bundle ID rename `ai.smallest.uxie → ai.uxie.app` | forces one-time-reinstall | 1 day |
 
-### Release pipeline
-- GitHub Actions: deep-signs every nested Mach-O inside-out, notarizes
-  via App Store Connect API key, staples, generates `latest-mac.yml` +
-  `latest.yml`, publishes Mac DMG + ZIP + Win EXE to `uxie-app/uxie-releases`.
-- Tag-push triggers auto-publish (`git tag vX.Y.Z && git push --tags`).
-- Auto-updater (electron-updater) works end-to-end on Mac.
+## Production-readiness status
 
-## Known issues / rough edges
+**Ready (use today):**
+- Code paths shipping at v1.4.0 — voice, meetings, tasks, briefings, referral
+- Error reporting via Sentry — engine + renderer + backend all wired
+- Privacy + ToS drafted (PRIVACY.md, TERMS.md)
+- Auto-update pipeline rock solid
+- Rate limits + burst limiters everywhere user-triggerable
 
-- **Bundle id is legacy.** `ai.smallest.uxie` — should rename to
-  `ai.uxie.app` eventually, but it forces a one-time reinstall. Deferred.
-- **No Sentry / error reporting.** When something breaks for a test user,
-  we have no visibility. Highest-leverage operational TODO.
-- **OAuth verification still in Testing mode.** Cap is 100 users. Each
-  must be added to Google Cloud Console → OAuth consent screen → Test
-  Users. Submitting for verification needs domain + privacy policy +
-  demo video first.
-- **No domain / no landing page / no ToS.** Deferred until ready for
-  public launch.
-- **No billing.** Pro tier exists in DB but no Stripe integration. All
-  users are effectively on the 30-day trial extended indefinitely.
-- **TCC dance for Screen Recording perm.** First Auto-detect toggle
-  shows an in-app explainer, but the macOS quirk of requiring an app
-  restart after granting is unavoidable.
-- **Pre-existing TS error** at [audio.ts](miniflow-electron/src/renderer/audio.ts#L161)
-  unrelated to anything new — silent type narrowing fix.
+**Pending — beta scale (≤100 users) works without these:**
+- Domain + public landing page
+- Google OAuth verification submission (currently in Testing mode → 100-user cap)
+- Stripe / billing
+- Analytics (PostHog or similar)
 
-## Deferred (intentionally, with rationale)
+When you cross 80 active testers, start the domain + verification track
+(~6 weeks). When you cross 200, finish billing. Until then, nothing
+here is on fire.
 
-- **Phase B**: Boss + worker decomposition for background tasks,
-  scheduled/recurring tasks, Morning Brief flagship template, Slack
-  OAuth wiring for the brief. *In flight as of 2026-05-24.*
-- **Phase D**: Referral system (+30 day Pro reward), workflow template
-  gallery, auto-stop meeting recording when call window closes.
-- **iOS companion app**: separate repo at `uxie-app/uxie-ios`, paused.
-- **Local LLM option**: Mac M-series can run Whisper/Llama locally but
-  the addressable market is small. Wait for paying-customer ask.
-- **Plugin marketplace**: premature — too few users.
-- **Team/workspace features**: single-player retention first.
-- **Personal memory / knowledge graph**: the highest-compounding long-term
-  feature, but blocked on getting daily-active users first.
+## How to onboard a new tester
 
-## The four files that matter if reviving
+1. Add their Gmail address to Google Cloud Console → APIs & Services →
+   OAuth consent screen → Test users → ADD USERS.
+2. Send them the latest DMG URL from
+   https://github.com/uxie-app/uxie-releases/releases.
+3. They install, run, sign in via OTP. Existing flows handle the rest.
 
-If you sit down 3 months from now and have to remember how things work:
+## The six files that matter if reviving
 
 | File | What lives there |
 |---|---|
 | [miniflow-engine/agent.py](miniflow-engine/agent.py) | Hotkey command path. Tool registry. Transform + formatting. System prompts. |
 | [miniflow-engine/audio_meeting.py](miniflow-engine/audio_meeting.py) | Meeting recording — spawns Swift tap, pipes PCM to Deepgram, appends transcripts. |
-| [miniflow-engine/meeting_watcher.py](miniflow-engine/meeting_watcher.py) | Auto-detection — spawns Swift tap in `--watch` mode, parses JSON window events. |
-| [native-helper/audio-tap/Sources/UxieAudioTap/main.swift](native-helper/audio-tap/Sources/UxieAudioTap/main.swift) | Single Swift binary with two modes: audio capture (default) and window watcher (`--watch`). |
-| [uxie-backend/tasks.py](uxie-backend/tasks.py) | Background-task agent loop on Railway. |
+| [miniflow-engine/meeting_watcher.py](miniflow-engine/meeting_watcher.py) | Auto-detection — `--watch` mode, parses window-presence events, fires meeting:detected. |
+| [native-helper/audio-tap/Sources/UxieAudioTap/main.swift](native-helper/audio-tap/Sources/UxieAudioTap/main.swift) | Single Swift binary with two modes: audio capture + window watcher. |
+| [uxie-backend/tasks.py](uxie-backend/tasks.py) | Background-task agent loop on Railway. Approval gate. Parallel tool exec. |
+| [uxie-backend/scheduled_tasks.py](uxie-backend/scheduled_tasks.py) | TEMPLATE_REGISTRY + cron worker for Briefings. Morning brief, evening recap, weekly digest generators all here. |
 | [uxie-backend/connectors/google.py](uxie-backend/connectors/google.py) | Gmail + Calendar + Drive tools as HTTP calls with 401-refresh-retry. |
+| [uxie-backend/connectors/slack.py](uxie-backend/connectors/slack.py) | Slack search / send / read tools. |
 
-## Where to start adding new features
+## Environment variables — what needs to be set
 
-- A new agent tool → add a schema entry in
-  [uxie-backend/connectors/{provider}.py](uxie-backend/connectors/),
-  branch in its `execute()`, done. The Mac agent and Tasks tab both
-  pick it up automatically via the registry.
-- A new tab in the Mac UI → mirror `MeetingsTab.tsx` / `TasksTab.tsx`
-  shape, add to the `SidebarTab` union in `App.tsx`, add a `Sidebar.tsx`
-  nav row.
-- A new IPC channel → `preload.ts` exposes it, `ipc.ts` registers a
-  handler that proxies to the engine via `invoke()`.
+**Railway (uxie-backend service):**
+```
+DATABASE_URL          (auto-provided by Railway Postgres)
+JWT_PRIVATE_KEY       (RS256 PEM)
+JWT_PUBLIC_KEY        (RS256 PEM)
+RESEND_API_KEY        (for OTP + briefing emails)
+GROQ_API_KEY
+OPENAI_API_KEY
+DEEPGRAM_API_KEY
+DEEPGRAM_PROJECT_ID   (for ephemeral key minting)
+GOOGLE_CLIENT_ID
+GOOGLE_CLIENT_SECRET
+SLACK_CLIENT_ID       ← optional; if missing, /oauth/slack/start 500s clearly and UI hides the Connect Slack button
+SLACK_CLIENT_SECRET   ← same
+SENTRY_DSN            (the backend Sentry project DSN)
+ADMIN_EMAILS          (comma-separated, for /admin/*)
+```
+
+**Engine + renderer (DSN baked into binary at build time):**
+- Engine Sentry DSN — hardcoded in `miniflow-engine/main.py`, overridable via `SENTRY_DSN` env var
+- Electron Sentry DSN — hardcoded in `miniflow-electron/src/main/index.ts`
 
 ## When in doubt
 
@@ -127,3 +113,8 @@ Read [PROCESS.md](PROCESS.md). It has the change-and-release lanes
 (Quick / Standard / Full / Release / Hotfix) and the project-specific
 landmines that have bitten us. Skipping lanes is how we ship the next
 React-hook bug.
+
+## Final tag
+
+**v1.4.0** = closing release. Everything in the "Shipped" table is
+included. Future patches go in v1.4.x.

@@ -4,7 +4,8 @@ type TaskStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
 type TaskEvent = {
   seq: number;
-  kind: "step_start" | "tool_call" | "tool_result" | "thinking" | "final_text" | "error";
+  kind: "step_start" | "tool_call" | "tool_result" | "thinking" | "final_text" | "error"
+      | "approval_needed" | "approval_resolved";
   data: any;
   created_at: string;
 };
@@ -313,7 +314,15 @@ function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: () => vo
         <section style={{ marginTop: 24 }}>
           <h3 style={sectionLabel}>Activity</h3>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {task.events.map(ev => <EventRow key={ev.seq} ev={ev} />)}
+            {task.events.map(ev =>
+              <EventRow
+                key={ev.seq}
+                ev={ev}
+                taskId={task.id}
+                isPending={isPendingApproval(task.events!, ev)}
+                onResolved={() => fetchOnce().then(() => onChanged())}
+              />
+            )}
           </div>
         </section>
       )}
@@ -321,11 +330,54 @@ function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: () => vo
   );
 }
 
-function EventRow({ ev }: { ev: TaskEvent }) {
+function isPendingApproval(events: TaskEvent[], target: TaskEvent): boolean {
+  if (target.kind !== "approval_needed") return false;
+  const targetId = target.data?.id;
+  if (!targetId) return false;
+  // Pending if no later approval_resolved event exists for the same id.
+  return !events.some(
+    e => e.kind === "approval_resolved" && e.data?.id === targetId,
+  );
+}
+
+function EventRow({
+  ev, taskId, isPending, onResolved,
+}: {
+  ev: TaskEvent;
+  taskId?: string;
+  isPending?: boolean;
+  onResolved?: () => void;
+}) {
   const baseStyle: React.CSSProperties = {
     fontSize: 12, padding: "8px 10px", borderRadius: 6,
     background: "rgba(0,0,0,0.03)", border: "1px solid rgba(0,0,0,0.06)",
   };
+
+  switch (ev.kind) {
+    case "approval_needed":
+      return (
+        <ApprovalRow
+          ev={ev}
+          taskId={taskId!}
+          isPending={!!isPending}
+          onResolved={onResolved!}
+        />
+      );
+    case "approval_resolved": {
+      const ok = !!ev.data?.approved;
+      return (
+        <div style={{ ...baseStyle, background: ok ? "rgba(58, 140, 106, 0.06)" : "rgba(212, 74, 74, 0.06)" }}>
+          <span style={{
+            color: ok ? "#3a8c6a" : "#d44a4a",
+            textTransform: "uppercase", fontSize: 10, letterSpacing: 0.05, fontWeight: 600,
+          }}>
+            {ok ? "APPROVED" : "DECLINED"}
+          </span>{" "}
+          <span style={{ color: "#666" }}>{ev.data?.name}</span>
+        </div>
+      );
+    }
+  }
 
   switch (ev.kind) {
     case "step_start":
@@ -385,6 +437,110 @@ function EventRow({ ev }: { ev: TaskEvent }) {
       return null;
   }
 }
+
+function ApprovalRow({
+  ev, taskId, isPending, onResolved,
+}: {
+  ev: TaskEvent;
+  taskId: string;
+  isPending: boolean;
+  onResolved: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const initialArgs = ev.data?.args ?? {};
+  const [edited, setEdited] = useState<Record<string, string>>(() =>
+    Object.fromEntries(Object.entries(initialArgs).map(([k, v]) => [k, String(v ?? "")]))
+  );
+
+  async function decide(approved: boolean) {
+    if (busy) return;
+    setBusy(true); setError(null);
+    try {
+      // Diff edited values against the original args so we only ship
+      // fields the user actually changed.
+      const diff: Record<string, string> = {};
+      for (const [k, v] of Object.entries(edited)) {
+        if (String(initialArgs[k] ?? "") !== v) diff[k] = v;
+      }
+      const r = await (window.miniflow as any).approveTask(
+        taskId, ev.data?.id, approved, approved && Object.keys(diff).length ? diff : null,
+      );
+      if (r?.error) setError(r.error);
+      else if (r?.ok === false) setError(r.reason || "could not resolve");
+      onResolved();
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const baseStyle: React.CSSProperties = {
+    fontSize: 12, padding: 12, borderRadius: 8,
+    background: isPending ? "rgba(244, 162, 27, 0.08)" : "rgba(0,0,0,0.03)",
+    border: isPending ? "1px solid rgba(244, 162, 27, 0.4)" : "1px solid rgba(0,0,0,0.06)",
+  };
+
+  return (
+    <div style={baseStyle}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+        <span style={{
+          color: isPending ? "#b87100" : "#888",
+          textTransform: "uppercase", fontSize: 10, letterSpacing: 0.05, fontWeight: 700,
+        }}>
+          {isPending ? "APPROVAL NEEDED" : "APPROVAL"}
+        </span>
+        <code style={{ fontSize: 11, color: "#666" }}>{ev.data?.name}</code>
+      </div>
+      <div style={{ marginBottom: 8, fontSize: 13 }}>
+        {ev.data?.summary || JSON.stringify(ev.data?.args || {})}
+      </div>
+
+      {isPending && Object.entries(initialArgs).length > 0 && (
+        <details style={{ marginBottom: 8 }}>
+          <summary style={{ fontSize: 11, color: "#666", cursor: "pointer" }}>
+            Edit params before approving
+          </summary>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+            {Object.entries(edited).map(([k, v]) => (
+              <label key={k} style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 11 }}>
+                <span style={{ color: "#888" }}>{k}</span>
+                {(typeof initialArgs[k] === "string" && initialArgs[k].length > 60)
+                  ? <textarea
+                      value={v} onChange={(e) => setEdited({ ...edited, [k]: e.target.value })}
+                      rows={3}
+                      style={{ padding: 6, borderRadius: 4, border: "1px solid #ddd", fontFamily: "inherit", fontSize: 12 }}
+                    />
+                  : <input
+                      value={v} onChange={(e) => setEdited({ ...edited, [k]: e.target.value })}
+                      style={{ padding: 6, borderRadius: 4, border: "1px solid #ddd", fontSize: 12 }}
+                    />}
+              </label>
+            ))}
+          </div>
+        </details>
+      )}
+
+      {isPending && (
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => decide(true)} disabled={busy} style={{
+            padding: "6px 14px", borderRadius: 6, border: "none",
+            background: "#1a1a1a", color: "#fff", fontWeight: 600, fontSize: 12, cursor: "pointer",
+          }}>Approve</button>
+          <button onClick={() => decide(false)} disabled={busy} style={{
+            padding: "6px 14px", borderRadius: 6, border: "1px solid #ccc",
+            background: "transparent", fontSize: 12, cursor: "pointer",
+          }}>Decline</button>
+        </div>
+      )}
+      {error && (
+        <div style={{ marginTop: 6, fontSize: 11, color: "#d44a4a" }}>{error}</div>
+      )}
+    </div>
+  );
+}
+
 
 const btnSecondary: React.CSSProperties = {
   marginTop: 8, padding: "6px 12px", borderRadius: 6,

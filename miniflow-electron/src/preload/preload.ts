@@ -179,6 +179,8 @@ const api = {
   listTasks:    () => ipcRenderer.invoke("tasks:list"),
   getTask:      (id: string) => ipcRenderer.invoke("tasks:get", id),
   cancelTask:   (id: string) => ipcRenderer.invoke("tasks:cancel", id),
+  approveTask:  (id: string, toolCallId: string, approved: boolean, editedArgs?: any) =>
+    ipcRenderer.invoke("tasks:approve", id, toolCallId, approved, editedArgs ?? null),
 
   // Scheduled tasks / Briefings (v1.2)
   listSchedules:  () => ipcRenderer.invoke("sched:list"),
@@ -186,6 +188,10 @@ const api = {
   patchSchedule:  (id: string, patch: any) => ipcRenderer.invoke("sched:patch", id, patch),
   deleteSchedule: (id: string) => ipcRenderer.invoke("sched:delete", id),
   fireSchedule:   (id: string) => ipcRenderer.invoke("sched:fire", id),
+
+  // Referrals (v1.4)
+  getReferralStats: () => ipcRenderer.invoke("referral:stats"),
+  redeemReferral:   (code: string) => ipcRenderer.invoke("referral:redeem", code),
   onMeetingDetected:   (cb: (m: any) => void) => listen("meeting:detected", cb),
   onMeetingTranscriptUpdate: (cb: (m: any) => void) => listen("meeting:transcript-update", cb),
   onMeetingsRefresh:   (cb: () => void) => listen("meetings:refresh", () => cb()),

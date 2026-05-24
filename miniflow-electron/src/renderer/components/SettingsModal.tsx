@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { HotkeySettings } from "./HotkeyRecorder";
 
-type SettingsTab = "account" | "hotkey" | "connectors" | "updates";
+type SettingsTab = "account" | "hotkey" | "connectors" | "invite" | "updates";
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<SettingsTab>("account");
@@ -13,6 +13,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           <span className="modal-title">Settings</span>
           <button className={`modal-tab ${tab === "account"    ? "active" : ""}`} onClick={() => setTab("account")}>Account</button>
           <button className={`modal-tab ${tab === "connectors" ? "active" : ""}`} onClick={() => setTab("connectors")}>Connectors</button>
+          <button className={`modal-tab ${tab === "invite"     ? "active" : ""}`} onClick={() => setTab("invite")}>Invite</button>
           <button className={`modal-tab ${tab === "hotkey"     ? "active" : ""}`} onClick={() => setTab("hotkey")}>Hotkey</button>
           <button className={`modal-tab ${tab === "updates"    ? "active" : ""}`} onClick={() => setTab("updates")}>Updates</button>
           <button className="modal-close" onClick={onClose} aria-label="Close">✕</button>
@@ -20,10 +21,163 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         <div className="modal-body">
           {tab === "account"    && <AccountTab />}
           {tab === "connectors" && <ConnectorsTab />}
+          {tab === "invite"     && <InviteTab />}
           {tab === "hotkey"     && <HotkeySettings />}
           {tab === "updates"    && <UpdatesTab />}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Invite tab ────────────────────────────────────────────────────────────────
+
+type ReferralStats = {
+  referral_code: string;
+  referral_link: string;
+  friends_joined: number;
+  days_earned: number;
+  free_days_remaining: number;
+};
+
+function InviteTab() {
+  const [stats, setStats] = useState<ReferralStats | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [redeem, setRedeem] = useState("");
+  const [redeemBusy, setRedeemBusy] = useState(false);
+  const [redeemMsg, setRedeemMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await (window.miniflow as any).getReferralStats?.();
+        if (r && !r.error) setStats(r);
+      } catch (e) {
+        console.error("[invite] stats failed:", e);
+      }
+    })();
+  }, []);
+
+  async function copyLink() {
+    if (!stats?.referral_link) return;
+    try {
+      await navigator.clipboard.writeText(stats.referral_link);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch (e) {
+      console.error("[invite] clipboard failed:", e);
+    }
+  }
+
+  async function applyRedeem() {
+    const code = redeem.trim();
+    if (!code || redeemBusy) return;
+    setRedeemBusy(true);
+    setRedeemMsg(null);
+    try {
+      const r = await (window.miniflow as any).redeemReferral?.(code);
+      if (r?.error) setRedeemMsg(r.error);
+      else if (r?.detail) {
+        setRedeemMsg(`✓ ${r.detail} — ${r.days_added} days added (you now have ${r.your_free_days} free days)`);
+        // Refresh stats
+        const fresh = await (window.miniflow as any).getReferralStats?.();
+        if (fresh && !fresh.error) setStats(fresh);
+        setRedeem("");
+      }
+    } catch (e: any) {
+      setRedeemMsg(String(e?.message ?? e));
+    } finally {
+      setRedeemBusy(false);
+    }
+  }
+
+  if (!stats) return <div style={{ color: "#888", fontSize: 13, padding: 16 }}>Loading…</div>;
+
+  return (
+    <div style={{ padding: 16, maxWidth: 520, display: "flex", flexDirection: "column", gap: 20 }}>
+      <section>
+        <h2 style={{ fontSize: 15, marginBottom: 6 }}>Invite friends, get free Pro</h2>
+        <p style={{ fontSize: 12, color: "#666", lineHeight: 1.5, marginBottom: 12 }}>
+          Share your link. When a friend signs up and activates, you both get <strong>+30 days of Uxie Pro</strong>.
+        </p>
+
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input
+            value={stats.referral_link}
+            readOnly
+            onClick={(e) => e.currentTarget.select()}
+            style={{
+              flex: 1, padding: "8px 10px", borderRadius: 6,
+              border: "1px solid #e5e3df", fontSize: 13,
+              background: "rgba(255,255,255,0.6)", fontFamily: "ui-monospace, monospace",
+            }}
+          />
+          <button onClick={copyLink} style={{
+            padding: "8px 14px", borderRadius: 6, border: "none",
+            background: "#1a1a1a", color: "#fff", fontWeight: 600, fontSize: 13, cursor: "pointer",
+          }}>
+            {copied ? "Copied!" : "Copy"}
+          </button>
+        </div>
+        <div style={{ fontSize: 11, color: "#888", marginTop: 6 }}>
+          Code: <code>{stats.referral_code}</code>
+        </div>
+      </section>
+
+      <section style={{
+        padding: 12, borderRadius: 8, background: "rgba(58, 140, 106, 0.08)",
+        border: "1px solid rgba(58, 140, 106, 0.2)",
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+          <span>Friends joined</span>
+          <strong>{stats.friends_joined}</strong>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+          <span>Days earned</span>
+          <strong>{stats.days_earned} days</strong>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+          <span>Your Pro balance</span>
+          <strong>{stats.free_days_remaining} days remaining</strong>
+        </div>
+      </section>
+
+      <section>
+        <h3 style={{ fontSize: 13, marginBottom: 6 }}>Got a code from a friend?</h3>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            value={redeem}
+            onChange={(e) => setRedeem(e.target.value.toUpperCase())}
+            placeholder="ABC12XYZ"
+            style={{
+              flex: 1, padding: "8px 10px", borderRadius: 6,
+              border: "1px solid #e5e3df", fontSize: 13,
+              background: "rgba(255,255,255,0.6)", fontFamily: "ui-monospace, monospace",
+              textTransform: "uppercase",
+            }}
+          />
+          <button
+            onClick={applyRedeem}
+            disabled={!redeem.trim() || redeemBusy}
+            style={{
+              padding: "8px 14px", borderRadius: 6, border: "1px solid #ccc",
+              background: "transparent", color: "#1a1a1a", fontSize: 13,
+              cursor: !redeem.trim() || redeemBusy ? "default" : "pointer",
+              opacity: !redeem.trim() || redeemBusy ? 0.5 : 1,
+            }}
+          >
+            {redeemBusy ? "Applying…" : "Apply"}
+          </button>
+        </div>
+        {redeemMsg && (
+          <div style={{
+            marginTop: 8, fontSize: 12,
+            color: redeemMsg.startsWith("✓") ? "#3a8c6a" : "#d44a4a",
+          }}>
+            {redeemMsg}
+          </div>
+        )}
+      </section>
     </div>
   );
 }

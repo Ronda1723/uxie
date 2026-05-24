@@ -229,6 +229,9 @@ export function registerIpc() {
   ipcMain.handle("tasks:list",   () => invoke("tasks_list", {}));
   ipcMain.handle("tasks:get",    (_e, id: string) => invoke("tasks_get", { id }));
   ipcMain.handle("tasks:cancel", (_e, id: string) => invoke("tasks_cancel", { id }));
+  ipcMain.handle("tasks:approve",
+    (_e, id: string, tool_call_id: string, approved: boolean, edited_args: any) =>
+      invoke("tasks_approve", { id, tool_call_id, approved, edited_args }));
 
   // Scheduled tasks / Briefings (v1.2)
   ipcMain.handle("sched:list",   () => invoke("sched_list", {}));
@@ -237,4 +240,8 @@ export function registerIpc() {
     invoke("sched_patch", { id, ...patch }));
   ipcMain.handle("sched:delete", (_e, id: string) => invoke("sched_delete", { id }));
   ipcMain.handle("sched:fire",   (_e, id: string) => invoke("sched_fire", { id }));
+
+  // Referrals (v1.4)
+  ipcMain.handle("referral:stats",  () => invoke("referral_stats", {}));
+  ipcMain.handle("referral:redeem", (_e, code: string) => invoke("referral_redeem", { code }));
 }

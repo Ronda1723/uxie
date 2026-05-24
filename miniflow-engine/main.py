@@ -585,6 +585,25 @@ async def _tasks_get(task_id: str) -> dict:
         return {"error": str(e)}
 
 
+async def _tasks_approve(task_id: str, tool_call_id: str, approved: bool, edited_args: dict | None) -> dict:
+    import httpx
+    jwt = config.get_jwt()
+    if not jwt:
+        return {"error": "not signed in"}
+    base = config.get_uxie_backend_url()
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{base}/tasks/{task_id}/approve",
+                headers={"Authorization": f"Bearer {jwt}"},
+                json={"tool_call_id": tool_call_id, "approved": approved, "edited_args": edited_args},
+            )
+        r.raise_for_status()
+        return r.json()
+    except httpx.HTTPError as e:
+        return {"error": str(e)}
+
+
 async def _tasks_cancel(task_id: str) -> dict:
     import httpx
     jwt = config.get_jwt()
@@ -649,6 +668,45 @@ async def _sched_delete(st_id: str) -> dict:
 
 async def _sched_fire(st_id: str) -> dict:
     return await _sched_request("POST", f"/scheduled_tasks/{st_id}/fire")
+
+
+async def _referral_stats() -> dict:
+    import httpx
+    jwt = config.get_jwt()
+    if not jwt:
+        return {"error": "not signed in"}
+    base = config.get_uxie_backend_url()
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"{base}/referral/stats",
+                headers={"Authorization": f"Bearer {jwt}"},
+            )
+        r.raise_for_status()
+        return r.json()
+    except httpx.HTTPError as e:
+        return {"error": str(e)}
+
+
+async def _referral_redeem(code: str) -> dict:
+    import httpx
+    jwt = config.get_jwt()
+    if not jwt:
+        return {"error": "not signed in"}
+    base = config.get_uxie_backend_url()
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{base}/referral/redeem",
+                headers={"Authorization": f"Bearer {jwt}"},
+                json={"code": code},
+            )
+        if r.status_code == 400 or r.status_code == 404:
+            return {"error": r.json().get("detail", f"HTTP {r.status_code}")}
+        r.raise_for_status()
+        return r.json()
+    except httpx.HTTPError as e:
+        return {"error": str(e)}
 
 
 async def _set_auto_detect_meetings(enabled: bool) -> dict:
@@ -773,12 +831,19 @@ async def invoke(command: str, body: dict = {}):
         "tasks_list":   lambda b: _tasks_list(),
         "tasks_get":    lambda b: _tasks_get(b["id"]),
         "tasks_cancel": lambda b: _tasks_cancel(b["id"]),
+        "tasks_approve": lambda b: _tasks_approve(
+            b["id"], b["tool_call_id"], bool(b.get("approved", False)),
+            b.get("edited_args") if isinstance(b.get("edited_args"), dict) else None,
+        ),
         # Scheduled tasks / Briefings (v1.2)
         "sched_list":   lambda b: _sched_list(),
         "sched_create": lambda b: _sched_create(b),
         "sched_patch":  lambda b: _sched_patch(b["id"], {k: v for k, v in b.items() if k != "id"}),
         "sched_delete": lambda b: _sched_delete(b["id"]),
         "sched_fire":   lambda b: _sched_fire(b["id"]),
+        # Referrals
+        "referral_stats":  lambda b: _referral_stats(),
+        "referral_redeem": lambda b: _referral_redeem(b["code"]),
         # App
         "open_settings":         lambda b: None,
     }
