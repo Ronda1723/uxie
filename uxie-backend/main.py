@@ -289,6 +289,7 @@ app.add_api_route("/tasks/create",      _tasks.tasks_create, methods=["POST"])
 app.add_api_route("/tasks",             _tasks.tasks_list,   methods=["GET"])
 app.add_api_route("/tasks/{task_id}",   _tasks.tasks_get,    methods=["GET"])
 app.add_api_route("/tasks/{task_id}/cancel", _tasks.tasks_cancel, methods=["POST"])
+app.add_api_route("/tasks/{task_id}/approve", _tasks.tasks_approve, methods=["POST"])
 
 # /scheduled_tasks/* — recurring user workflows (Morning Brief etc, v1.2)
 import scheduled_tasks as _sched_routes  # noqa: E402

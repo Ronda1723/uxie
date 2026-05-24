@@ -60,14 +60,28 @@ _settings = get_settings()
 # tool-call loop could burn unbounded tokens.
 MAX_TASK_TURNS = 8
 
-# Read-only allowlist for v1.1.0. The LLM only sees these tools (filtered
-# out of `connectors.tool_schemas_for_user`). Adding a destructive tool
-# requires landing the approval-gate flow in tasks.py first (v1.2).
+# Read-only tools the LLM can call freely — no approval required.
 READ_ONLY_TOOLS: set[str] = {
     "gmail_search", "gmail_read",
     "calendar_list_events", "calendar_check_availability",
     "drive_search", "drive_read", "drive_list",
+    "slack_search", "slack_list_channels", "slack_read_channel",
 }
+
+# Destructive tools — the LLM CAN call these in background tasks, but
+# we park execution until the user clicks Approve in the Tasks tab.
+# Each gets a 5-minute approval window before auto-cancelling.
+DESTRUCTIVE_TOOLS: set[str] = {
+    "gmail_send", "gmail_reply", "gmail_draft",
+    "slack_send_message",
+    "calendar_create_event",
+}
+
+# Union — what the agent loop will accept.
+ALL_ALLOWED_TOOLS: set[str] = READ_ONLY_TOOLS | DESTRUCTIVE_TOOLS
+
+# Approval window for a parked destructive tool call before auto-cancel.
+APPROVAL_TIMEOUT_S = 300
 
 DEFAULT_MODEL = "gpt-4o"
 DEFAULT_PROVIDER = "openai"
@@ -132,8 +146,9 @@ async def _update_task_status(
 # ── Tool schema filtering ─────────────────────────────────────────────────────
 
 
-async def _read_only_tool_schemas(db: AsyncSession, user_id: int) -> list[dict]:
-    """Like connectors.tool_schemas_for_user but filtered to READ_ONLY_TOOLS."""
+async def _allowed_tool_schemas(db: AsyncSession, user_id: int) -> list[dict]:
+    """Tools the agent can see: read-only + destructive (gated). The
+    destructive ones park on approval before actually executing."""
     if _connectors is None:
         return []
     try:
@@ -141,7 +156,56 @@ async def _read_only_tool_schemas(db: AsyncSession, user_id: int) -> list[dict]:
     except Exception:
         _log.warning("connector schema lookup failed", exc_info=True)
         return []
-    return [s for s in all_schemas if s.get("function", {}).get("name") in READ_ONLY_TOOLS]
+    return [s for s in all_schemas if s.get("function", {}).get("name") in ALL_ALLOWED_TOOLS]
+
+
+# ── Approval gate ────────────────────────────────────────────────────────────
+# Each destructive tool call parks on an asyncio.Event keyed by
+# (task_id, tool_call_id). /tasks/{id}/approve resolves it.
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class _ApprovalGate:
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+    approved: bool = False
+    edited_args: dict | None = None
+
+
+_APPROVAL_GATES: dict[tuple[str, str], _ApprovalGate] = {}
+_APPROVAL_LOCK = asyncio.Lock()
+
+
+async def _park_for_approval(
+    task_id: str, tool_call_id: str, timeout_s: float
+) -> tuple[bool, dict | None]:
+    """Block until /tasks/{id}/approve fires for this tool_call. Returns
+    (approved, edited_args_or_None). Times out → (False, None)."""
+    gate = _ApprovalGate()
+    async with _APPROVAL_LOCK:
+        _APPROVAL_GATES[(task_id, tool_call_id)] = gate
+    try:
+        await asyncio.wait_for(gate.event.wait(), timeout=timeout_s)
+        return gate.approved, gate.edited_args
+    except asyncio.TimeoutError:
+        return False, None
+    finally:
+        async with _APPROVAL_LOCK:
+            _APPROVAL_GATES.pop((task_id, tool_call_id), None)
+
+
+async def _resolve_approval(
+    task_id: str, tool_call_id: str, approved: bool, edited_args: dict | None,
+) -> bool:
+    async with _APPROVAL_LOCK:
+        gate = _APPROVAL_GATES.get((task_id, tool_call_id))
+    if gate is None:
+        return False
+    gate.approved = approved
+    gate.edited_args = edited_args
+    gate.event.set()
+    return True
 
 
 # ── Agent loop ────────────────────────────────────────────────────────────────
@@ -207,7 +271,7 @@ async def _run_task_loop(task_id: str, user_id: int, prompt: str) -> None:
         try:
             await _update_task_status(db, task_id, status="running")
 
-            tool_schemas = await _read_only_tool_schemas(db, user_id)
+            tool_schemas = await _allowed_tool_schemas(db, user_id)
 
             # If the user hasn't connected any data providers, fail
             # immediately with a clear message rather than let the LLM
@@ -312,9 +376,12 @@ async def _run_task_loop(task_id: str, user_id: int, prompt: str) -> None:
                     final_text = content or ""
                     break
 
-                # Execute each tool call in sequence (parallel will come with
-                # boss/worker decomposition in v1.2).
-                for tc in tool_calls:
+                # Execute tool calls. Read-only ones run in parallel via
+                # asyncio.gather (the "v1 boss/worker" — multiple finds at
+                # once, real worker decomposition later). Destructive ones
+                # serialize through the approval gate so we don't surprise-
+                # send 4 emails before the user can blink.
+                async def _execute_one(tc: dict) -> dict:
                     tc_id = tc.get("id") or _ulid()
                     fn = tc.get("function") or {}
                     name = fn.get("name", "")
@@ -324,22 +391,43 @@ async def _run_task_loop(task_id: str, user_id: int, prompt: str) -> None:
                     except Exception:
                         args = {}
 
-                    if name not in READ_ONLY_TOOLS:
-                        # Defensive: LLM tried to call a tool we didn't
-                        # advertise. Reject with a clear tool message.
+                    if name not in ALL_ALLOWED_TOOLS:
                         await _append_event(db, task_id, "tool_call", {
                             "id": tc_id, "name": name, "args": args, "rejected": True,
                         })
-                        messages.append({
-                            "role": "tool", "tool_call_id": tc_id,
-                            "content": f"Tool {name!r} is not available in background tasks (read-only mode).",
+                        return {
+                            "tool_call_id": tc_id,
+                            "content": f"Tool {name!r} is not available in background tasks.",
+                        }
+
+                    # Destructive → park for user approval before executing.
+                    if name in DESTRUCTIVE_TOOLS:
+                        await _append_event(db, task_id, "approval_needed", {
+                            "id": tc_id, "name": name, "args": args,
+                            "summary": _summarize_destructive(name, args),
                         })
-                        continue
+                        await db.commit()
+                        approved, edited_args = await _park_for_approval(
+                            task_id, tc_id, APPROVAL_TIMEOUT_S,
+                        )
+                        if not approved:
+                            await _append_event(db, task_id, "approval_resolved", {
+                                "id": tc_id, "name": name, "approved": False,
+                            })
+                            return {
+                                "tool_call_id": tc_id,
+                                "content": f"User declined to {name}. Stop trying to run it.",
+                            }
+                        # Merge edited args (only fields the user changed).
+                        if edited_args:
+                            args = {**args, **edited_args}
+                        await _append_event(db, task_id, "approval_resolved", {
+                            "id": tc_id, "name": name, "approved": True, "args": args,
+                        })
 
                     await _append_event(db, task_id, "tool_call", {
                         "id": tc_id, "name": name, "args": args,
                     })
-                    await db.commit()
 
                     if _connectors is None:
                         result_str = "connector registry unavailable"
@@ -351,10 +439,6 @@ async def _run_task_loop(task_id: str, user_id: int, prompt: str) -> None:
                         except Exception as e:
                             ok = False
                             raw = str(e)
-                            # Translate the most common low-level errors into
-                            # something actionable. Without this, the LLM sees
-                            # a raw "Gmail GET /users/me/messages → 401: {…}"
-                            # and either guesses or repeats the error verbatim.
                             if "401" in raw:
                                 result_str = (
                                     "Your Google connection has expired or been revoked. "
@@ -364,8 +448,7 @@ async def _run_task_loop(task_id: str, user_id: int, prompt: str) -> None:
                             elif "403" in raw:
                                 result_str = (
                                     "Google denied the request — likely an OAuth scope is missing. "
-                                    "Tell the user: disconnect and reconnect Google in Settings → Connectors "
-                                    "to re-grant the required scopes. "
+                                    "Tell the user: disconnect and reconnect Google in Settings → Connectors. "
                                     f"(raw: {raw[:200]})"
                                 )
                             else:
@@ -375,12 +458,17 @@ async def _run_task_loop(task_id: str, user_id: int, prompt: str) -> None:
                         "id": tc_id, "name": name, "ok": ok,
                         "result_preview": (result_str or "")[:1000],
                     })
-                    messages.append({
-                        "role": "tool", "tool_call_id": tc_id,
-                        "content": result_str or "",
-                    })
+                    return {"tool_call_id": tc_id, "content": result_str or ""}
 
-                # Commit between turns so the client polling sees progress.
+                # Run all read-only calls in parallel. Destructive ones are
+                # in the same gather but each parks on its own approval gate,
+                # so user can approve them in whatever order they want.
+                tool_results = await asyncio.gather(
+                    *[_execute_one(tc) for tc in tool_calls],
+                    return_exceptions=False,
+                )
+                for tr in tool_results:
+                    messages.append({"role": "tool", "tool_call_id": tr["tool_call_id"], "content": tr["content"]})
                 await db.commit()
             else:
                 # Hit MAX_TASK_TURNS without an assistant final response.
@@ -493,6 +581,49 @@ async def tasks_get(
             for e in events
         ],
     }
+
+
+def _summarize_destructive(name: str, args: dict) -> str:
+    """Short human-readable summary of a pending destructive action,
+    shown in the approval card."""
+    if name == "gmail_send":
+        return f"Send email to {args.get('to', '?')} — subject: {(args.get('subject') or '')[:80]}"
+    if name == "gmail_reply":
+        return f"Reply on thread {args.get('threadId', '?')[:12]}…"
+    if name == "gmail_draft":
+        return f"Create draft to {args.get('to', '?')} — subject: {(args.get('subject') or '')[:80]}"
+    if name == "slack_send_message":
+        return f"Post to {args.get('channel', '?')} — {(args.get('text') or '')[:100]}"
+    if name == "calendar_create_event":
+        return f"Create event '{args.get('title', '?')}' {args.get('start','')} → {args.get('end','')}"
+    return f"{name}({', '.join(args.keys())})"
+
+
+class TaskApproveRequest(BaseModel):
+    tool_call_id: str
+    approved: bool
+    edited_args: dict | None = None
+
+
+async def tasks_approve(
+    task_id: str,
+    body: TaskApproveRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    """Approve or reject a pending destructive tool call inside a task."""
+    # Sanity: confirm the task belongs to this user.
+    task = (await db.execute(
+        select(BackgroundTask).where(
+            BackgroundTask.id == task_id, BackgroundTask.user_id == user.id,
+        )
+    )).scalar_one_or_none()
+    if task is None:
+        raise HTTPException(404, "task not found")
+    ok = await _resolve_approval(task_id, body.tool_call_id, body.approved, body.edited_args)
+    if not ok:
+        return {"ok": False, "reason": "no pending gate — likely timed out or already resolved"}
+    return {"ok": True}
 
 
 async def tasks_cancel(
