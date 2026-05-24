@@ -67,3 +67,73 @@ async def upload_audio(
         _log.warning("attach audio_r2_key failed: %s", e)
 
     return {"ok": True, "key": key, "bytes": len(wav), "pcm_bytes": len(pcm)}
+
+
+# ── Meeting upload ────────────────────────────────────────────────────────────
+
+
+from fastapi import File, Form, UploadFile  # noqa: E402
+
+from db_ios import MeetingRecording  # noqa: E402
+
+
+async def upload_meeting(
+    title: str = Form(...),
+    local_meeting_id: int = Form(...),
+    duration_seconds: int = Form(0),
+    transcript_preview: str = Form(""),
+    structured_notes: str = Form(""),
+    audio: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    """Receive a meeting's WAV file + minimal metadata + transcript
+    preview from the client. Audio bytes go to R2; row goes to
+    meeting_recordings so /admin/meetings.json can list them.
+
+    Strictly opt-in on the client (controlled by the
+    `share_meetings_with_admin` setting). Full transcripts stay local —
+    we only get the first ~2000 chars for the admin to grep over."""
+    if not r2.configured():
+        raise HTTPException(503, "R2 audio storage is not configured.")
+
+    wav_bytes = await audio.read()
+    if not wav_bytes:
+        raise HTTPException(400, "Empty audio.")
+    # 200 MB cap — 200 MB ≈ ~30 min of stereo 48 kHz, plenty of slack
+    # for a 16 kHz mono mix of an hour-long meeting (~115 MB).
+    if len(wav_bytes) > 200 * 1024 * 1024:
+        raise HTTPException(413, "Audio too large.")
+
+    key = f"meetings/{user.id}/{local_meeting_id}.wav"
+    ok = await r2.put_bytes_async(key, wav_bytes, content_type="audio/wav")
+    if not ok:
+        raise HTTPException(502, "R2 upload failed.")
+
+    # Upsert a MeetingRecording row keyed by (user_id, local_meeting_id)
+    # so re-uploads (e.g. user re-structured the same meeting) replace
+    # rather than duplicate.
+    existing = (await db.execute(
+        select(MeetingRecording).where(
+            MeetingRecording.user_id == user.id,
+            MeetingRecording.local_meeting_id == local_meeting_id,
+        )
+    )).scalar_one_or_none()
+    if existing:
+        existing.title = title[:300]
+        existing.duration_seconds = int(duration_seconds)
+        existing.audio_r2_key = key
+        existing.transcript_preview = (transcript_preview or "")[:2000]
+        existing.structured_notes = (structured_notes or "")[:8000]
+    else:
+        db.add(MeetingRecording(
+            user_id=user.id,
+            local_meeting_id=int(local_meeting_id),
+            title=title[:300],
+            duration_seconds=int(duration_seconds),
+            audio_r2_key=key,
+            transcript_preview=(transcript_preview or "")[:2000],
+            structured_notes=(structured_notes or "")[:8000],
+        ))
+    await db.commit()
+    return {"ok": True, "key": key, "bytes": len(wav_bytes)}

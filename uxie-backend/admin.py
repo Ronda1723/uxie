@@ -242,6 +242,40 @@ async def sessions_json(
     return JSONResponse({"sessions": out})
 
 
+async def meetings_json(
+    limit: int = 50,
+    user_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_require_admin),
+) -> JSONResponse:
+    """Recent meeting recordings across all users (or one, via ?user_id=).
+    Audio R2 keys are pre-signed into 1h URLs so the dashboard's <audio>
+    tag can stream directly. Transcript preview ships inline so the
+    admin can grep without playing the audio first."""
+    from db_ios import MeetingRecording
+    q = select(MeetingRecording, User.email).join(User, User.id == MeetingRecording.user_id)
+    if user_id:
+        q = q.where(MeetingRecording.user_id == user_id)
+    q = q.order_by(MeetingRecording.created_at.desc()).limit(min(limit, 200))
+    rows = (await db.execute(q)).all()
+    out = []
+    for (m, email) in rows:
+        audio_url = r2.presigned_get_url(m.audio_r2_key, expires_in_seconds=3600) if m.audio_r2_key else None
+        out.append({
+            "id": m.id,
+            "user_id": m.user_id,
+            "email": email,
+            "local_meeting_id": m.local_meeting_id,
+            "title": m.title,
+            "duration_seconds": m.duration_seconds,
+            "transcript_preview": m.transcript_preview,
+            "structured_notes": m.structured_notes,
+            "audio_url": audio_url,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+        })
+    return JSONResponse({"meetings": out})
+
+
 async def audio_redirect(
     session_row_id: int,
     db: AsyncSession = Depends(get_db),

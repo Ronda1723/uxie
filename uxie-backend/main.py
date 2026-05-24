@@ -136,6 +136,7 @@ app.add_api_route("/admin/dashboard",    admin.dashboard_html, methods=["GET"], 
 app.add_api_route("/admin/stats.json",   admin.stats_json,     methods=["GET"])
 app.add_api_route("/admin/users.json",   admin.users_json,     methods=["GET"])
 app.add_api_route("/admin/sessions.json", admin.sessions_json, methods=["GET"])
+app.add_api_route("/admin/meetings.json", admin.meetings_json, methods=["GET"])
 app.add_api_route("/admin/user/{user_id}.json", admin.user_detail_json, methods=["GET"])
 app.add_api_route("/admin/audio/{session_row_id}", admin.audio_redirect, methods=["GET"])
 
@@ -143,6 +144,7 @@ app.add_api_route("/admin/audio/{session_row_id}", admin.audio_redirect, methods
 # ── Debug (client audio upload) ───────────────────────────────────────────────
 
 app.add_api_route("/debug/upload-audio", debug.upload_audio, methods=["POST"])
+app.add_api_route("/meetings/upload", debug.upload_meeting, methods=["POST"])
 
 
 # ── User status ───────────────────────────────────────────────────────────────

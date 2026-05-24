@@ -122,6 +122,13 @@
     </section>
 
     <section>
+      <h2>Recent meetings · audio + transcript preview</h2>
+      <div style="background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden;" id="meetings-container">
+        <div style="padding: 14px; color: var(--muted)">loading…</div>
+      </div>
+    </section>
+
+    <section>
       <h2>Users</h2>
       <table id="users-table">
         <thead>
@@ -198,6 +205,7 @@ function card(label, value, sub) {
 async function loadStats() { return apiJson("/admin/stats.json"); }
 async function loadUsers() { return apiJson("/admin/users.json"); }
 async function loadSessions() { return apiJson("/admin/sessions.json?limit=50"); }
+async function loadMeetings() { return apiJson("/admin/meetings.json?limit=50"); }
 
 function renderSummary(s) {
   const u = s.users;
@@ -326,14 +334,51 @@ function renderSessions(sessions) {
   `).join("");
 }
 
+function fmtDuration(seconds) {
+  if (!seconds) return "0s";
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+function renderMeetings(meetings) {
+  const container = document.getElementById("meetings-container");
+  if (!meetings || meetings.length === 0) {
+    container.innerHTML = `<div style="padding:14px;color:var(--muted)">no meetings uploaded yet — flip on "Share with admin" in Settings → Account on the Mac app, then record a meeting</div>`;
+    return;
+  }
+  container.innerHTML = meetings.map(m => `
+    <details style="border-bottom: 1px solid var(--border); padding: 10px 14px;">
+      <summary style="cursor: pointer; display: flex; gap: 12px; align-items: center; font-size: 13px;">
+        <span style="font-variant-numeric: tabular-nums; color: var(--muted); min-width: 120px;">${fmtDate(m.created_at)}</span>
+        <span style="min-width: 180px; color: var(--muted);">${escapeHtml(m.email)}</span>
+        <span style="min-width: 80px; color: var(--muted); font-size: 11px;">${fmtDuration(m.duration_seconds)}</span>
+        <span style="flex:1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(m.title || "(untitled)")}</span>
+      </summary>
+      ${m.audio_url ? `<div style="margin-top: 12px;"><audio controls preload="metadata" style="width:100%" src="${m.audio_url}"></audio></div>` : `<div style="margin-top: 8px; color: var(--muted); font-size: 11px;">audio missing (R2 upload failed?)</div>`}
+      ${m.transcript_preview ? `<div style="margin-top: 12px;">
+        <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 6px;">Transcript preview (first 2000 chars)</div>
+        <div style="background: #0c0c0e; padding: 10px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; line-height: 1.45; max-height: 280px; overflow:auto;">${escapeHtml(m.transcript_preview)}</div>
+      </div>` : ""}
+      ${m.structured_notes ? `<div style="margin-top: 12px;">
+        <div style="font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 6px;">Structured notes</div>
+        <div style="background: #0c0c0e; padding: 10px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; line-height: 1.45; max-height: 320px; overflow:auto;">${escapeHtml(m.structured_notes)}</div>
+      </div>` : ""}
+    </details>
+  `).join("");
+}
+
 (async () => {
   try {
-    const [stats, users, sessions] = await Promise.all([loadStats(), loadUsers(), loadSessions()]);
+    const [stats, users, sessions, meetings] = await Promise.all([
+      loadStats(), loadUsers(), loadSessions(), loadMeetings()
+    ]);
     document.getElementById("meta").textContent = "updated " + fmtDate(stats.generated_at);
     renderSummary(stats);
     renderLLMTable("#llm-24h-table", stats.llm.last_24h);
     renderLLMTable("#llm-mtd-table", stats.llm.mtd);
     renderSessions(sessions.sessions);
+    renderMeetings(meetings.meetings);
     renderUsers(users.users);
   } catch (e) {
     showError(e.message);

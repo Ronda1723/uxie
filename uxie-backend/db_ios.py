@@ -141,6 +141,28 @@ class ScheduledTask(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_now)
 
 
+class MeetingRecording(Base):
+    """Server-side index of meeting recordings uploaded for admin review.
+    Audio bytes themselves live in R2; this row holds the metadata + the
+    R2 key + a transcript preview so the dashboard can render without
+    pulling the full audio.
+
+    Strictly opt-in: clients only upload when the user toggles
+    "share meetings with admin" in Settings. Without that, meetings
+    stay local (per PRIVACY.md)."""
+    __tablename__ = "meeting_recordings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    local_meeting_id = Column(Integer, nullable=False)   # the ID on the user's local meetings.db
+    title = Column(String, nullable=False)
+    duration_seconds = Column(Integer, nullable=False, default=0)
+    audio_r2_key = Column(String, nullable=True)         # filled after R2 upload
+    transcript_preview = Column(Text, nullable=True)     # first ~2000 chars; full transcript stays local
+    structured_notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now, index=True)
+
+
 class OAuthToken(Base):
     """Server-side OAuth tokens for connectors (Slack, Google, GitHub, ...).
     One row per (user_id, provider). The OAuth callback flow (TODO) writes
