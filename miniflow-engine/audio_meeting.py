@@ -247,14 +247,24 @@ async def start_capture(meeting_id: int) -> dict:
         # 2. Open Deepgram long-form streaming socket.
         #    - diarize:true → speaker labels (Speaker 0/1/...)
         #    - smart_format + punctuate → readable output for the structure pass
-        #    - interim_results:false → only persist finals (cheaper, simpler)
-        #    - no endpointing close — the user owns Stop
+        #    - interim_results:true + endpointing=300 → live partials, 300 ms
+        #      after silence finalize. Previous config (interim_results=false,
+        #      no endpointing=) defaulted to Deepgram's ~10 s VAD turnoff,
+        #      so transcripts appeared 10+ s after speech ended. This is the
+        #      "delay in transcript" symptom users were feeling.
+        #    - utterances=true gives clean utterance-end boundaries for
+        #      cleaner diarization + paragraph breaks.
+        #    - keywords= boosts the user's name + product/brand vocabulary.
+        from audio import deepgram_keywords_qs
+        kw = deepgram_keywords_qs()
         url = (
             f"wss://api.deepgram.com/v1/listen"
             f"?model=nova-3"
             f"&encoding=linear16&sample_rate={_SAMPLE_RATE}&channels=1&language=en-US"
             f"&punctuate=true&smart_format=true&diarize=true"
-            f"&interim_results=false"
+            f"&interim_results=true&endpointing=300&utterances=true"
+            f"&filler_words=false"
+            + (("&" + kw) if kw else "")
         )
         try:
             sess.ws = await websockets.connect(
@@ -389,8 +399,16 @@ async def _pump_tap_to_deepgram(sess: _Session) -> None:
 
 
 async def _pump_deepgram_transcripts(sess: _Session) -> None:
-    """Each Deepgram `is_final` chunk → append to the meeting transcript +
-    broadcast `meeting:transcript-update` so the renderer live-updates."""
+    """Drain Deepgram's events:
+
+      - is_final=true  → committed utterance. Append to transcript +
+                          broadcast `meeting:transcript-update`.
+      - is_final=false → interim partial. Broadcast
+                          `meeting:interim-transcript` for live rendering
+                          (the MeetingsTab detail view shows it in a
+                          translucent "live" line, replaced when the
+                          final lands).
+    """
     assert sess.ws is not None
     import meetings  # local import to dodge circular dependency
     try:
@@ -403,14 +421,21 @@ async def _pump_deepgram_transcripts(sess: _Session) -> None:
                 continue
             if data.get("type") != "Results":
                 continue
-            if not data.get("is_final"):
-                continue
             alts = data.get("channel", {}).get("alternatives", [{}])
             transcript = (alts[0].get("transcript") or "").strip()
             if not transcript:
                 continue
-            appended = meetings.append_transcript_chunk(sess.meeting_id, transcript)
-            await _emit("meeting:transcript-update", appended)
+            if data.get("is_final"):
+                appended = meetings.append_transcript_chunk(sess.meeting_id, transcript)
+                # Clear the interim line since this utterance is now committed.
+                await _emit("meeting:interim-transcript", {
+                    "id": sess.meeting_id, "interim": "",
+                })
+                await _emit("meeting:transcript-update", appended)
+            else:
+                await _emit("meeting:interim-transcript", {
+                    "id": sess.meeting_id, "interim": transcript[:500],
+                })
     except websockets.exceptions.ConnectionClosed:
         pass
     except asyncio.CancelledError:

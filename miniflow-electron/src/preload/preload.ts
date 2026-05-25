@@ -196,6 +196,7 @@ const api = {
   redeemReferral:   (code: string) => ipcRenderer.invoke("referral:redeem", code),
   onMeetingDetected:   (cb: (m: any) => void) => listen("meeting:detected", cb),
   onMeetingTranscriptUpdate: (cb: (m: any) => void) => listen("meeting:transcript-update", cb),
+  onMeetingInterimTranscript: (cb: (m: any) => void) => listen("meeting:interim-transcript", cb),
   onMeetingsRefresh:   (cb: () => void) => listen("meetings:refresh", () => cb()),
   onMeetingsReveal:    (cb: () => void) => listen("meetings:reveal", () => cb()),
 

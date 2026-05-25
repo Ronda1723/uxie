@@ -32,6 +32,47 @@ log = logging.getLogger("audio")
 # bundle can verify Smallest AI's certificate.
 _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
 
+
+def deepgram_keywords_qs() -> str:
+    """Build the `keywords=Foo:2&keywords=Bar:2` query string for Deepgram's
+    vocabulary boost. Pulled from the user's name + product/brand list +
+    dictionary entries. Intensifier 2 = moderate boost (1=default, 3=strong).
+
+    Shared between audio.py (dictation) and audio_meeting.py (meeting) so
+    proper nouns the user actually says — colleagues' first names,
+    product names, jargon — get recognized at meaningfully better rates.
+    """
+    from urllib.parse import quote
+    words: set[str] = set()
+
+    # User's own name — often spoken in meetings, often misheard.
+    try:
+        name = (config.get_user_name() or "").strip()
+        for w in name.split():
+            if 3 <= len(w) <= 20:
+                words.add(w)
+    except Exception:
+        pass
+
+    # Brand / product anchors — narrow but reliably useful.
+    words.update(["Uxie", "Smallest", "Granola", "Slack"])
+
+    # Dictionary entries — usually proper nouns the user has already
+    # corrected. The `from` field is the spoken form; first token is
+    # most likely the name we want boosted.
+    try:
+        import dictionary as _dict
+        for entry in _dict.get_dictionary():
+            first = (entry.get("from") or "").split()[:1]
+            if first and 3 <= len(first[0]) <= 20:
+                words.add(first[0])
+    except Exception:
+        pass
+
+    # Filter to alphanumeric-ish strings to avoid breaking the URL.
+    safe = sorted(w for w in words if w.replace("-", "").replace("'", "").isalnum())
+    return "&".join(f"keywords={quote(w)}:2" for w in safe)
+
 _broadcaster: Callable | None = None
 _dg_ws = None                          # Deepgram WebSocket
 _sample_rate = 16000
@@ -180,13 +221,26 @@ async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
         return
     log.info(f"Deepgram key prefix: {key[:8]}... (len={len(key)})")
 
+    # Dictation params:
+    # - nova-3 is the latest general-purpose Deepgram model.
+    # - endpointing=200 closes an utterance after 200 ms of silence —
+    #   tight for snappy hotkey-press dictation.
+    # - interim_results streams partials so the user sees text appear
+    #   as they speak (rendered in the floating capsule).
+    # - filler_words=false drops "um / uh / like" automatically.
+    # - utterances=true emits utterance-end events with clean boundaries.
+    # - keywords= boost recognition of user's name + brand/product nouns.
     url = (
         f"wss://api.deepgram.com/v1/listen"
         f"?model=nova-3"
         f"&encoding=linear16&sample_rate={sample_rate}&language=en-US"
         f"&punctuate=true&numerals=true&smart_format=true"
         f"&interim_results=true&endpointing=200"
+        f"&filler_words=false&utterances=true"
     )
+    kw = deepgram_keywords_qs()
+    if kw:
+        url += "&" + kw
     try:
         _dg_ws = await websockets.connect(
             url,

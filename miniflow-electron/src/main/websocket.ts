@@ -120,6 +120,7 @@ function forwardToRenderer(event: string, payload: unknown): void {
     event === "approval-resolved"   ? "agent:approval-resolved" :
     event === "meeting:detected"    ? "meeting:detected" :
     event === "meeting:transcript-update" ? "meeting:transcript-update" :
+    event === "meeting:interim-transcript" ? "meeting:interim-transcript" :
     null;
   if (!channel) return;
   // Broadcast to every live BrowserWindow exactly ONCE. We used to also loop

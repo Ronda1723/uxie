@@ -324,12 +324,25 @@ function MeetingDetail({
   const [structuring, setStructuring] = useState(false);
   const [structureError, setStructureError] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
+  const [interim, setInterim] = useState("");
   const notesDebounce = useRef<number | null>(null);
 
   // Reset local state when switching meetings.
   useEffect(() => {
     setNotes(meeting.user_notes);
     setStructureError(null);
+    setInterim("");
+  }, [meeting.id]);
+
+  // Subscribe to live interim transcripts. Only render the partial when
+  // it's for THIS meeting AND the recording is still active.
+  useEffect(() => {
+    const off = (w.miniflow as any).onMeetingInterimTranscript?.((p: any) => {
+      if (p?.id === meeting.id) {
+        setInterim(p.interim || "");
+      }
+    });
+    return () => { off?.(); };
   }, [meeting.id]);
 
   // Persist notes to the engine 800ms after the last keystroke. Avoids
@@ -453,10 +466,14 @@ function MeetingDetail({
         </section>
       )}
 
-      {hasTranscript && (
+      {(hasTranscript || (meeting.status === "recording" && interim)) && (
         <section style={{ marginTop: 24 }}>
           <h3 style={sectionLabel}>Transcript</h3>
-          <pre style={{ ...preBox, maxHeight: 320 }}>{meeting.transcript}</pre>
+          <pre style={{ ...preBox, maxHeight: 320 }}>{meeting.transcript || ""}{
+            meeting.status === "recording" && interim
+              ? <span style={{ opacity: 0.55, fontStyle: "italic" }}> {interim}</span>
+              : null
+          }</pre>
         </section>
       )}
 
