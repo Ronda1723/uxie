@@ -245,26 +245,22 @@ async def start_capture(meeting_id: int) -> dict:
             return {"error": f"could not spawn audio tap: {e}"}
 
         # 2. Open Deepgram long-form streaming socket.
-        #    - diarize:true → speaker labels (Speaker 0/1/...)
-        #    - smart_format + punctuate → readable output for the structure pass
-        #    - interim_results:true + endpointing=300 → live partials, 300 ms
-        #      after silence finalize. Previous config (interim_results=false,
-        #      no endpointing=) defaulted to Deepgram's ~10 s VAD turnoff,
-        #      so transcripts appeared 10+ s after speech ended. This is the
-        #      "delay in transcript" symptom users were feeling.
-        #    - utterances=true gives clean utterance-end boundaries for
-        #      cleaner diarization + paragraph breaks.
-        #    - keywords= boosts the user's name + product/brand vocabulary.
-        from audio import deepgram_keywords_qs
-        kw = deepgram_keywords_qs()
+        # - diarize → speaker labels
+        # - interim_results + endpointing=300 → partials stream as people
+        #   speak; 300 ms silence finalizes. v1.4.x and earlier had
+        #   interim_results=false and no endpointing= set, which fell
+        #   through to Deepgram's ~10 s default VAD turnoff — the source
+        #   of the "transcripts arrive 10s late" symptom.
+        #
+        # v1.5.0 also tried utterances/filler_words/keywords params but
+        # Deepgram rejected the WS handshake (HTTP 400). Reverted in
+        # v1.5.1 until we identify which specific param isn't supported.
         url = (
             f"wss://api.deepgram.com/v1/listen"
             f"?model=nova-3"
             f"&encoding=linear16&sample_rate={_SAMPLE_RATE}&channels=1&language=en-US"
             f"&punctuate=true&smart_format=true&diarize=true"
-            f"&interim_results=true&endpointing=300&utterances=true"
-            f"&filler_words=false"
-            + (("&" + kw) if kw else "")
+            f"&interim_results=true&endpointing=300"
         )
         try:
             sess.ws = await websockets.connect(

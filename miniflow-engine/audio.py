@@ -221,26 +221,22 @@ async def start_listening(sample_rate: int = 16000, mode: str = "dictation"):
         return
     log.info(f"Deepgram key prefix: {key[:8]}... (len={len(key)})")
 
-    # Dictation params:
-    # - nova-3 is the latest general-purpose Deepgram model.
-    # - endpointing=200 closes an utterance after 200 ms of silence —
-    #   tight for snappy hotkey-press dictation.
-    # - interim_results streams partials so the user sees text appear
-    #   as they speak (rendered in the floating capsule).
-    # - filler_words=false drops "um / uh / like" automatically.
-    # - utterances=true emits utterance-end events with clean boundaries.
-    # - keywords= boost recognition of user's name + brand/product nouns.
+    # Dictation params. nova-3 is the latest general-purpose model.
+    # endpointing=200 closes an utterance after 200 ms of silence — tight
+    # for snappy hotkey-press dictation. interim_results streams partials
+    # so text appears as the user speaks.
+    #
+    # Note: filler_words / utterances / keywords were tried in v1.5.0 but
+    # Deepgram rejected the WS handshake (HTTP 400) — one of them isn't
+    # supported on nova-3 streaming. Reverted in v1.5.1. We can re-introduce
+    # individually once we know which one breaks.
     url = (
         f"wss://api.deepgram.com/v1/listen"
         f"?model=nova-3"
         f"&encoding=linear16&sample_rate={sample_rate}&language=en-US"
         f"&punctuate=true&numerals=true&smart_format=true"
         f"&interim_results=true&endpointing=200"
-        f"&filler_words=false&utterances=true"
     )
-    kw = deepgram_keywords_qs()
-    if kw:
-        url += "&" + kw
     try:
         _dg_ws = await websockets.connect(
             url,
