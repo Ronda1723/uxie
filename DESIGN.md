@@ -467,6 +467,419 @@ Things we tried and explicitly chose not to do.
 
 ---
 
+## 8. How to build new UI
+
+The practical companion to §2-3. If you're adding a new screen or
+component, this section is the checklist.
+
+### 8.1 File structure
+
+```
+miniflow-electron/src/
+├── main/                        Electron main process
+│   ├── index.ts                 entry — wires hotkey, helper, ws, ipc
+│   ├── ipc.ts                   ALL IPC handlers (one per renderer→engine call)
+│   ├── tray.ts                  menu-bar + popover window
+│   ├── overlayWindow.ts         floating capsule (hotkey overlay)
+│   ├── meetingNotifications.ts  native macOS notifications
+│   ├── websocket.ts             local WS bridge engine → renderer
+│   └── widgetState.ts           floating-capsule state machine
+├── preload/
+│   └── preload.ts               EVERY window.miniflow.* method declared here
+├── renderer/
+│   ├── App.tsx                  top-level — tab switching + onboarding gate
+│   ├── main.tsx                 React root + Sentry init + ErrorBoundary
+│   ├── styles.css               legacy CSS (sidebar nav, modal envelope, fields)
+│   ├── audio.ts                 useAudioCapture hook (renderer mic)
+│   ├── overlay.tsx              floating capsule UI
+│   └── components/
+│       ├── Sidebar.tsx          left rail — add new nav-item here
+│       ├── HomeTab.tsx          first-load landing
+│       ├── TasksTab.tsx         background tasks (two-pane)
+│       ├── BriefingsTab.tsx     scheduled workflows (template cards)
+│       ├── MeetingsTab.tsx      meetings (two-pane)
+│       ├── DictionaryTab.tsx    word substitutions
+│       ├── SnippetsTab.tsx      text expansion triggers
+│       ├── SettingsModal.tsx    modal with nested tabs (Account/Connectors/Invite/Hotkey/Updates)
+│       ├── OverlayWidget.tsx    approval overlay (floats over the focused app)
+│       ├── Onboarding.tsx       first-launch flow (email + OTP + permissions)
+│       └── ApprovalWidget.tsx   inline approval card (used in Tasks)
+└── shared/
+    └── types.ts                 IpcChannels enum + shared TS types
+```
+
+**Rule:** a new feature usually adds ONE file under `components/` and
+one entry in `App.tsx` + `Sidebar.tsx`. Don't sprawl across folders for
+a single feature.
+
+### 8.2 Styling approach (live state, with rationale)
+
+Uxie uses **two coexisting style systems** — pick the right one per use case:
+
+1. **Inline `React.CSSProperties` objects** (preferred for new components).
+   Style constants live at the bottom of the component file. Used by
+   TasksTab, BriefingsTab, MeetingsTab. No external CSS file dependency,
+   no class-name collisions, easy to fork for component variants.
+
+2. **CSS classes in `styles.css`** (legacy, used by the original Home / Sidebar
+   / SettingsModal scaffolding). Stays around because the existing classes
+   (`.modal`, `.modal-tab`, `.field`, `.row`, `.stack`, `.btn-secondary`,
+   `.info-msg`) compose cleanly with native macOS aesthetic.
+
+**Rule of thumb:** new isolated component → inline. Reusing modal /
+form scaffolding → use the existing class. Don't introduce a new
+component-styles file (Tailwind, CSS modules, styled-components, etc.)
+without a strong reason — the current two-system setup works.
+
+### 8.3 Reusable style constants — copy from these
+
+Drop these at the bottom of any new component file. They're already
+used in TasksTab / BriefingsTab / MeetingsTab — keep them identical so
+the visual language stays consistent.
+
+```tsx
+const card: React.CSSProperties = {
+  padding: 16, borderRadius: 8, border: "1px solid #e5e3df",
+  background: "rgba(255,255,255,0.6)",
+};
+
+const sectionLabel: React.CSSProperties = {
+  fontSize: 11, textTransform: "uppercase", letterSpacing: 0.05,
+  color: "#888", fontWeight: 700, marginBottom: 8,
+};
+
+const fieldLabel: React.CSSProperties = {
+  fontSize: 12, color: "#666", paddingTop: 7,
+};
+
+const input: React.CSSProperties = {
+  padding: "6px 8px", borderRadius: 6, border: "1px solid #e5e3df",
+  fontFamily: "inherit", fontSize: 13,
+  background: "rgba(255,255,255,0.8)",
+};
+
+const btnPrimary: React.CSSProperties = {
+  padding: "8px 14px", borderRadius: 6, border: "none",
+  background: "#1a1a1a", color: "#fff", fontWeight: 600,
+  cursor: "pointer", fontSize: 13,
+};
+
+const btnSecondary: React.CSSProperties = {
+  padding: "8px 14px", borderRadius: 6, border: "1px solid #ccc",
+  background: "transparent", color: "#1a1a1a",
+  cursor: "pointer", fontSize: 13,
+};
+
+const btnDanger: React.CSSProperties = {
+  padding: "8px 14px", borderRadius: 6, border: "1px solid #d44a4a",
+  background: "transparent", color: "#d44a4a",
+  cursor: "pointer", fontSize: 13,
+};
+
+const chipBtn: React.CSSProperties = {
+  padding: "3px 8px", borderRadius: 12, border: "1px solid #e5e3df",
+  background: "transparent", fontSize: 11, cursor: "pointer", color: "#666",
+};
+
+const preBox: React.CSSProperties = {
+  whiteSpace: "pre-wrap", fontFamily: "inherit", fontSize: 13,
+  padding: 12, borderRadius: 6, background: "rgba(0,0,0,0.04)",
+  border: "1px solid rgba(0,0,0,0.06)", overflow: "auto",
+};
+```
+
+### 8.4 Status pill component (canonical implementation)
+
+Every new status indicator should follow this pattern:
+
+```tsx
+const STATUS_COLORS: Record<MyStatus, string> = {
+  active:    "#3a8c6a",  // green
+  running:   "#3367d6",  // blue
+  pending:   "#F4A21B",  // amber
+  failed:    "#d44a4a",  // red
+  done:      "#7a5cd1",  // purple
+  idle:      "#5b6878",  // gray-blue
+};
+
+function StatusPill({ status }: { status: MyStatus }) {
+  const color = STATUS_COLORS[status] ?? "#888";
+  return (
+    <span style={{
+      fontSize: 11, padding: "2px 8px", borderRadius: 10,
+      background: color + "22", color, fontWeight: 600,
+      textTransform: "uppercase", letterSpacing: 0.04,
+    }}>
+      {status}
+    </span>
+  );
+}
+```
+
+Always uppercase. Always color@13% background (the `+ "22"` hex alpha).
+Always positioned top-right of the entity's container.
+
+### 8.5 Anatomy: a new tab in the left rail
+
+Step-by-step, end-to-end. Pretend we're adding a "Memory" tab.
+
+**Step 1.** Create the component. `src/renderer/components/MemoryTab.tsx`:
+
+```tsx
+import React, { useEffect, useState, useCallback } from "react";
+
+const w = window as any;
+
+export function MemoryTab() {
+  const [items, setItems] = useState<any[]>([]);
+
+  const refresh = useCallback(async () => {
+    const r = await w.miniflow.listMemoryItems();
+    setItems(r?.items ?? []);
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  return (
+    <div style={{ display: "flex", height: "100%" }}>
+      <aside style={{
+        width: 320, borderRight: "1px solid #e5e3df", overflow: "auto",
+        background: "rgba(255,255,255,0.4)",
+      }}>
+        <div style={{ padding: "16px 16px 12px" }}>
+          <div style={{ fontWeight: 700, fontSize: 15 }}>Memory</div>
+        </div>
+        {items.map(it => (
+          <button key={it.id} style={{
+            display: "block", width: "100%", textAlign: "left",
+            padding: "10px 16px", border: "none", background: "transparent",
+            borderBottom: "1px solid rgba(0,0,0,0.04)", cursor: "pointer",
+          }}>
+            <div style={{ fontSize: 13 }}>{it.title}</div>
+          </button>
+        ))}
+      </aside>
+      <div style={{ flex: 1, overflow: "auto", padding: "20px 24px" }}>
+        <h1 style={{ fontSize: 22 }}>Memory</h1>
+        <p style={{ fontSize: 13, color: "#666" }}>
+          Things Uxie remembers about you and your work.
+        </p>
+      </div>
+    </div>
+  );
+}
+```
+
+**Step 2.** Register it in `App.tsx`:
+
+```tsx
+// 1. Add to the SidebarTab union
+export type SidebarTab =
+  "home" | "tasks" | "briefings" | "meetings"
+  | "memory"     // ← new
+  | "dictionary" | "snippets";
+
+// 2. Import the component
+import { MemoryTab } from "./components/MemoryTab";
+
+// 3. Render it inside the tab switch
+{tab === "memory" && <MemoryTab />}
+```
+
+**Step 3.** Add the nav row in `Sidebar.tsx`:
+
+```tsx
+<div className={`nav-item ${activeTab === "memory" ? "active" : ""}`}
+     onClick={() => onTab("memory")}>
+  <span className="icon">🧠</span><span>Memory</span>
+</div>
+```
+
+**Step 4.** Add the IPC + preload bridge if the new tab needs to talk
+to the engine (most do). See §8.6.
+
+That's it — four file touches for a new tab. No CSS, no build config,
+no manifest changes.
+
+### 8.6 Anatomy: a new IPC channel (renderer → engine)
+
+Three files always:
+
+**1.** `preload.ts` — declare the renderer-facing method:
+
+```ts
+listMemoryItems: () => ipcRenderer.invoke("memory:list"),
+addMemoryItem:   (text: string) => ipcRenderer.invoke("memory:add", text),
+```
+
+**2.** `main/ipc.ts` — register the handler:
+
+```ts
+ipcMain.handle("memory:list", () => invoke("memory_list", {}));
+ipcMain.handle("memory:add",  (_e, text: string) => invoke("memory_add", { text }));
+```
+
+**3.** `miniflow-engine/main.py` — add to the invoke dispatcher's
+`handlers` dict:
+
+```python
+"memory_list": lambda b: memory.list_items(),
+"memory_add":  lambda b: memory.add_item(b["text"]),
+```
+
+Plus implement `memory.py` (a new engine module) with the actual
+business logic. If it talks to Railway, the function is async and
+returns a JSON-able dict.
+
+**Naming convention:**
+- IPC channel: `feature:verb` (kebab-case area, colon, verb)
+- Preload method: `verbFeature` (camelCase)
+- Engine invoke key: `feature_verb` (snake_case)
+
+### 8.7 Anatomy: a new Railway backend route
+
+Three files in `uxie-backend/`:
+
+**1.** `db_ios.py` — add the table (additive, no migration needed
+because `init_db()` runs `create_all`):
+
+```python
+class MemoryItem(Base):
+    __tablename__ = "memory_items"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    text = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+```
+
+**2.** `memory.py` (new file) — write the endpoint functions:
+
+```python
+async def list_items(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    rows = (await db.execute(
+        select(MemoryItem).where(MemoryItem.user_id == user.id)
+        .order_by(desc(MemoryItem.created_at)).limit(100)
+    )).scalars().all()
+    return {"items": [_row(r) for r in rows]}
+```
+
+**3.** `main.py` — wire the routes:
+
+```python
+import memory as _memory  # noqa: E402
+app.add_api_route("/memory",     _memory.list_items, methods=["GET"])
+app.add_api_route("/memory",     _memory.add_item,   methods=["POST"])
+```
+
+JWT-gating is automatic via `Depends(current_user)`. Per-tier rate
+limits via `check_and_increment(db, user, "command")` if it's a
+non-trivial action.
+
+### 8.8 Anatomy: a list + detail two-pane layout
+
+The shape used by TasksTab + MeetingsTab. Crib from either when adding
+a new entity-list view.
+
+```tsx
+function MyTab() {
+  const [items, setItems] = useState<Item[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = items.find(i => i.id === selectedId) ?? null;
+
+  return (
+    <div style={{ display: "flex", height: "100%" }}>
+      <ItemList items={items} selectedId={selectedId} onSelect={setSelectedId} />
+      <div style={{ flex: 1, overflow: "auto", padding: "20px 24px" }}>
+        {selected ? <ItemDetail item={selected} /> : <EmptyState />}
+      </div>
+    </div>
+  );
+}
+```
+
+**Conventions:**
+- Left rail is 280-320px depending on row density (320 for tasks-with-prompts, 280 for meetings)
+- Selected row gets `background: "rgba(0,0,0,0.06)"`
+- Each row has 10-12px vertical padding, 16px horizontal
+- Status pill on the right of each row, formatted timestamp on the left
+- Empty detail state is gray italic text: *"Select a thing to see details"*
+
+### 8.9 Anatomy: a card with form + actions (briefings template style)
+
+When the user is configuring something (a scheduled task, a connector,
+a preference), use this shape:
+
+```tsx
+<div style={card}>
+  <div style={{ display: "flex", justifyContent: "space-between" }}>
+    <h2 style={{ fontSize: 15, margin: 0 }}>Title</h2>
+    <StatusPill status={status} />
+  </div>
+  <p style={{ marginTop: 6, fontSize: 12, color: "#666", lineHeight: 1.5 }}>
+    One-line description of what this card does.
+  </p>
+
+  <div style={{
+    display: "grid", gridTemplateColumns: "auto 1fr",
+    gap: "12px 16px", marginTop: 16,
+  }}>
+    <label style={fieldLabel}>Field name</label>
+    <input value={...} style={input} />
+    {/* repeat label / input pairs */}
+  </div>
+
+  <div style={{ marginTop: 16, display: "flex", gap: 8 }}>
+    <button onClick={save} style={btnPrimary}>Save</button>
+    <button onClick={remove} style={btnDanger}>Delete</button>
+  </div>
+
+  {error && <div style={{ marginTop: 12, color: "#d44a4a", fontSize: 12 }}>
+    {error}
+  </div>}
+</div>
+```
+
+`gridTemplateColumns: "auto 1fr"` is the magic — labels auto-size,
+inputs take the rest. Cleaner than flexbox for form layouts.
+
+### 8.10 Common gotchas
+
+- **Don't put hooks after early returns.** v1.0.29 shipped with this bug
+  (React error #310). Hooks must be called unconditionally on every
+  render. If you have `if (loading) return null;`, all `useState` /
+  `useEffect` calls must be ABOVE that line.
+- **TypeScript renderer + main are two separate tsconfigs.** Run BOTH
+  before pushing: `./node_modules/.bin/tsc --noEmit` AND
+  `./node_modules/.bin/tsc -p tsconfig.main.json --noEmit`.
+- **`window.miniflow` is `any`-typed by default.** Some code uses
+  `(window.miniflow as any).newMethod()` for new methods. That's fine for
+  shipping; tighten with `global.d.ts` when it stabilizes.
+- **Polling loops need cleanup.** Always return the unsubscribe from
+  `useEffect`. Forgotten cleanup = memory leak that grows with every
+  tab switch.
+- **Don't change PROCESS.md lanes silently.** If you ship without
+  running typecheck → it WILL break (see v1.0.29, v1.5.0). Use the
+  lanes; lanes save you.
+
+### 8.11 When in doubt — patterns to copy
+
+| You're building | Copy from | Why |
+|---|---|---|
+| New list-of-things tab | `TasksTab.tsx` | Two-pane, polling, status pills |
+| New scheduled workflow | `BriefingsTab.tsx` | Template card pattern, time picker |
+| New config card | `BriefingsTab.MorningBriefCard` | Form grid + actions row |
+| New modal | `SettingsModal.tsx` | Multi-tab modal scaffold |
+| New approval card variant | `TasksTab.ApprovalRow` | Editable params + decide buttons |
+| Brand-new tab | `MeetingsTab.tsx` | Header + Connect-Provider empty state |
+
+Don't reinvent. Copy + delete what you don't need + rename.
+
+---
+
 ## Closing
 
 This document is a contract with future-us. If a decision here proves wrong, update the entry — but record *why* the original reasoning was insufficient. The doc gets MORE useful as we accumulate "we tried X, switched to Y because Z" notes — not less useful.
