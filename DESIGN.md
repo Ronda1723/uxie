@@ -880,6 +880,690 @@ Don't reinvent. Copy + delete what you don't need + rename.
 
 ---
 
+## 9. Component library — exact components shipped in Uxie
+
+This section is a reference catalog of every component currently living
+in `miniflow-electron/src/renderer/components/`. For each: the file
+path + line count, props interface, what it does, the canonical
+anatomy snippet, and which screens use it. Read this when you need to
+ship something that LOOKS like the rest of the app without re-inventing.
+
+Components total: 15 files, ~4600 lines.
+
+### 9.1 Sidebar — left rail navigation
+**File:** `Sidebar.tsx` (73 lines) · **Used by:** App.tsx (always rendered)
+
+The left navigation rail. Logo header, listening pill (visible only
+when mic is hot), 6 tab nav items, Pro upgrade card spacer, Settings
++ Help buttons pinned at the bottom.
+
+```tsx
+interface Props {
+  activeTab: SidebarTab;
+  onTab: (t: SidebarTab) => void;
+  isListening: boolean;
+  onSettings: () => void;
+}
+
+export function Sidebar({ activeTab, onTab, isListening, onSettings }: Props) {
+  return (
+    <nav className="sidebar">
+      <div className="traffic">
+        <span className="dot close" onClick={() => window.miniflow.quit()} />
+        <span className="dot min" />
+        <span className="dot zoom" />
+      </div>
+      <div className="logo-row">
+        <span className="wave-icon">〰</span>
+        <span className="logo-text">Miniflow</span>
+        <span className="pill-basic">Basic</span>
+      </div>
+      {isListening && (
+        <div className="listening-pill">
+          <span className="dot" /><span>Listening</span>
+        </div>
+      )}
+      <div className={`nav-item ${activeTab === "home" ? "active" : ""}`}
+           onClick={() => onTab("home")}>
+        <span className="icon">⌂</span><span>Home</span>
+      </div>
+      {/* …repeat for tasks / briefings / meetings / dictionary / snippets */}
+      <div className="spacer" />
+      <button className="sidebar-btn" onClick={onSettings}>
+        <span>⚙</span><span>Settings</span>
+      </button>
+    </nav>
+  );
+}
+```
+
+**Adding a tab requires THREE places to change:**
+1. `App.tsx` — extend the `SidebarTab` union + render the new component
+2. `Sidebar.tsx` — add a new `nav-item` div with the emoji icon + label
+3. The new tab's component file under `components/`
+
+`SidebarTab` is the union type controlling everything — `"home" | "tasks" | "briefings" | "meetings" | "dictionary" | "snippets"` today.
+
+---
+
+### 9.2 HomeTab — landing screen
+**File:** `HomeTab.tsx` (554 lines) · **Used by:** App.tsx when `tab === "home"`
+
+The first screen after onboarding. Greeting, voice-capture banner
+(animated waveform when mic is hot), recent dictation history, and
+the dictate-now affordance.
+
+```tsx
+interface Props {
+  userName: string;
+  isListening: boolean;
+  isProcessing: boolean;
+  captureMode?: "dictation" | "command";
+}
+
+export function HomeTab({ userName, isListening, isProcessing,
+                          captureMode = "dictation" }: Props) {
+  // Renders: <DictateBanner /> + history list + provider info
+}
+```
+
+**Internal sub-components:**
+- `DictateBanner` — the animated big "hold fn to talk" panel at the top
+  of the home screen. Pulses + shows waveform when `isListening`.
+- History list — each entry has the spoken transcript + cleaned output
+  + timestamp + status pill (success / failed / dictation / command).
+
+---
+
+### 9.3 TasksTab — background agent tasks
+**File:** `TasksTab.tsx` (560 lines) · **Used by:** App.tsx when `tab === "tasks"`
+
+Two-pane layout. Left rail has the prompt input + history. Right pane
+shows the selected task's full event log + result + inline approval
+cards. **Reference implementation for any "list + detail" tab.**
+
+```tsx
+type TaskStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+
+type TaskEvent = {
+  seq: number;
+  kind: "step_start" | "tool_call" | "tool_result" | "thinking"
+      | "final_text" | "error" | "approval_needed" | "approval_resolved";
+  data: any;
+  created_at: string;
+};
+
+type Task = {
+  id: string; prompt: string; status: TaskStatus;
+  result_md: string | null; error: string | null;
+  created_at: string; completed_at: string | null;
+  events?: TaskEvent[];
+};
+
+export function TasksTab() {
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // …polling every 5s while any task is non-terminal
+  return (
+    <div style={{ display: "flex", height: "100%" }}>
+      <TaskList ... />
+      <div style={{ flex: 1, overflow: "auto", padding: "20px 24px" }}>
+        {selected ? <TaskDetail ... /> : <EmptyDetail />}
+      </div>
+    </div>
+  );
+}
+```
+
+**Internal sub-components:**
+- `TaskList` — left rail (320px wide). Top section: textarea + Submit
+  button + ⌘↵ hint. Bottom: history list with `<StatusPill>` per row.
+- `TaskDetail` — right pane. Header (prompt + status pill), Cancel
+  button (active tasks only), result markdown (`<pre>`), Activity log
+  rendering each `EventRow`.
+- `EventRow` — typed-color event renderer (THINKING blue / CALL green /
+  RESULT neutral / ERROR red / APPROVAL amber).
+- `ApprovalRow` — inline approval card. Amber tinted background,
+  collapsible param editor (`<details>`), Approve / Decline buttons.
+  Distinguishes pending (interactive) vs resolved (read-only history)
+  via `isPendingApproval` helper.
+- `EmptyDetail` — "Select a task to see its plan, tool calls, and
+  result." Gray italic, paddingTop 40.
+
+---
+
+### 9.4 BriefingsTab — scheduled workflows
+**File:** `BriefingsTab.tsx` (348 lines) · **Used by:** App.tsx when `tab === "briefings"`
+
+Vertical stack of three `TemplateCard`s (Morning Brief, End-of-Day Recap,
+Weekly Digest). Below them: inline preview of the most recent fired brief.
+
+```tsx
+type TemplateDef = {
+  kind: string;            // "morning_brief" | "evening_recap" | "weekly_digest"
+  label: string;
+  description: string;
+  default_time: string;    // "08:00"
+  default_times: string[]; // chip suggestions ["07:00","07:30","08:00",...]
+};
+
+const TEMPLATES: TemplateDef[] = [
+  { kind: "morning_brief",  label: "Morning Brief",
+    description: "Today's calendar + unread Gmail (+ Slack if connected)…",
+    default_time: "08:00",
+    default_times: ["07:00","07:30","08:00","08:30","09:00","09:30","10:00"] },
+  { kind: "evening_recap",  label: "End-of-Day Recap", … },
+  { kind: "weekly_digest",  label: "Weekly Digest",    … },
+];
+
+export function BriefingsTab() {
+  // Lists schedules, renders one TemplateCard per template,
+  // polls every 60s.
+}
+```
+
+**Sub-components:**
+- `TemplateCard` — collapsible card with time picker, timezone input,
+  delivery checkboxes, Save / Send-now / Delete buttons, last-fired
+  timestamp. Card is collapsed (just title + description + "Set up"
+  CTA) when not active; expanded when scheduled. **Canonical
+  "form-card" pattern — copy from here when building config UI.**
+
+---
+
+### 9.5 MeetingsTab — meeting recordings + transcripts
+**File:** `MeetingsTab.tsx` (544 lines) · **Used by:** App.tsx when `tab === "meetings"`
+
+Two-pane like TasksTab but with a top banner (auto-detect toggle) +
+empty state (Connect Google Calendar) before the list shows.
+
+```tsx
+type Meeting = {
+  id: number;
+  calendar_event_id: string;
+  title: string;
+  start_ts: number; end_ts: number;
+  meeting_url: string; organizer: string;
+  attendees: Array<{ email: string; name: string; response: string }>;
+  status: "detected" | "recording" | "ended" | "structured" | "skipped";
+  transcript: string;
+  user_notes: string;
+  structured_notes: string;
+  audio_path: string | null;
+  audio_size_bytes: number;
+  created_at: number; updated_at: number;
+};
+
+export function MeetingsTab() {
+  // Checks Google OAuth connection. If not connected →
+  // <ConnectCalendarEmptyState />. Otherwise → AutoDetectBanner +
+  // MeetingList + (selected ? MeetingDetail : EmptyDetail).
+}
+```
+
+**Sub-components:**
+- `ConnectCalendarEmptyState` — pre-connection screen with a single
+  "Connect Google Calendar" CTA + descriptive paragraph + privacy line.
+- `AutoDetectBanner` — top bar with "Auto-detect meetings" toggle.
+  Pre-confirmation dialog before turning ON (TCC + relaunch warning).
+- `MeetingList` — left rail (280px wide). Each row: title, formatted
+  start time (Today/Tomorrow/Date), `<StatusPill>`.
+- `MeetingDetail` — header + URL link + AudioPlayer (if `audio_path`)
+  + action buttons (Start/Stop recording / Send now / Structure /
+  Delete) + live interim transcript line + structured notes + transcript.
+- `AudioPlayer` — `<audio controls>` for the local WAV at file:// URL.
+- `EmptyDetail` — "Select a meeting to view details…"
+
+---
+
+### 9.6 SettingsModal — modal with nested tabs
+**File:** `SettingsModal.tsx` (788 lines) · **Used by:** App.tsx (rendered when `settingsOpen`)
+
+Full-screen-blocker modal with 5 tabs across the top: Account /
+Connectors / Invite / Hotkey / Updates.
+
+```tsx
+type SettingsTab = "account" | "hotkey" | "connectors" | "invite" | "updates";
+
+export function SettingsModal({ onClose }: { onClose: () => void }) {
+  const [tab, setTab] = useState<SettingsTab>("account");
+  return (
+    <div className="overlay" onClick={(e) => {
+      if (e.target === e.currentTarget) onClose();
+    }}>
+      <div className="modal" role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <span className="modal-title">Settings</span>
+          <button className={`modal-tab ${tab === "account" ? "active" : ""}`}
+                  onClick={() => setTab("account")}>Account</button>
+          {/* …other tabs… */}
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        <div className="modal-body">
+          {tab === "account"    && <AccountTab />}
+          {tab === "connectors" && <ConnectorsTab />}
+          {tab === "invite"     && <InviteTab />}
+          {tab === "hotkey"     && <HotkeySettings />}
+          {tab === "updates"    && <UpdatesTab />}
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+**Sub-tab components (defined in the same file):**
+- `AccountTab` — email, tier, usage counters, free days, referral code,
+  "Share meetings with admin" toggle, Sign out button.
+- `ConnectorsTab` — list of OAuth providers (Google, Slack) + MCP
+  servers with Connect / Disconnect actions per row.
+- `InviteTab` — referral link with copy button + stats (friends joined,
+  days earned, Pro balance) + redeem code input.
+- `HotkeySettings` — imports from `./HotkeyRecorder` (separate file).
+- `UpdatesTab` — auto-update phases (idle/checking/available/downloading/
+  downloaded/error) + "Check for updates" + "Install now" buttons.
+
+**Modal scaffold uses CSS classes from `styles.css`** (`.overlay`, `.modal`,
+`.modal-tab`, `.modal-close`, `.field`, `.row`, `.stack`). Reuse this
+scaffold for any new modal.
+
+---
+
+### 9.7 Onboarding — first-launch flow
+**File:** `Onboarding.tsx` (245 lines) · **Used by:** App.tsx instead of the main UI when not signed in OR missing permissions
+
+Sequential steps:
+
+```tsx
+export function Onboarding({ onDone }: { onDone: () => void }) {
+  // Step 1: <AuthStep />  — email + OTP entry
+  // Step 2: <PermissionsStep /> — Mic / Accessibility / Input Monitoring grants
+}
+
+function AuthStep({ onDone }) { /* email field → OTP field → verify */ }
+function PermissionsStep({ onDone }) { /* one PermRow per macOS permission */ }
+function PermRow({ perm, busy, onGrant }: {
+  perm: { id: PermissionState["id"]; label: string; status: string };
+  busy: boolean;
+  onGrant: () => void;
+}) {
+  /* row with permission name, status pill, Grant button */
+}
+```
+
+**Permissions checked:** microphone, accessibility, input-monitoring.
+Each maps to a System Settings link if the user denies and needs to
+manually grant later.
+
+---
+
+### 9.8 OverlayWidget — floating approval over the focused app
+**File:** `OverlayWidget.tsx` (540 lines) · **Used by:** rendered inside `overlay.tsx` (a separate Electron window)
+
+The floating capsule + approval surface that hovers over whatever app
+the user is in. Not part of the main popover window — it's its own
+borderless transparent window via `overlayWindow.ts` in main process.
+
+Three states (driven by `widget:state` IPC event payload):
+- **Dictating** — animated waveform, "listening…" or live interim transcript
+- **Transcribing** — spinner, "processing…"
+- **Awaiting approval** — full approval card with To/Subject/Body
+  inline-editable, Send/Edit/Cancel buttons
+
+```tsx
+// State machine driven entirely by IPC from main process.
+window.miniflow.onWidgetState((state: any) => {
+  // state = { kind: "dictating", text } | { kind: "approval", tool, params }
+  // | { kind: "idle" } | …
+});
+
+// On Send: ships ONLY THE DIFF of params back to engine
+window.miniflow.sendApproval(true, editedParamsDiff);
+```
+
+**Key behaviors:**
+- Reports its rendered height back to main via `reportWidgetSize` so the
+  Electron window resizes without layout jump
+- Animates IN from the bottom edge (~250 ms spring)
+- Click-through to underlying app when in passive states (no `pointer-events`)
+
+---
+
+### 9.9 ApprovalWidget — minimal approval primitive
+**File:** `ApprovalWidget.tsx` (73 lines) · **Used by:** standalone components needing approval flow
+
+Lighter-weight than OverlayWidget. Listens on `agent:approval-needed`
+IPC and renders a simple card. Not currently rendered in the main UI
+(superseded by the inline TasksTab.ApprovalRow for background tasks
+and by OverlayWidget for voice commands), but kept as a clean primitive.
+
+```tsx
+interface ApprovalRequest {
+  tool: string;
+  summary: string;
+  params: Record<string, unknown>;
+}
+
+export function ApprovalWidget() {
+  const [request, setRequest] = useState<ApprovalRequest | null>(null);
+  useEffect(() => {
+    const off = (window.miniflow as any).onApprovalNeeded?.(setRequest);
+    return () => off?.();
+  }, []);
+  if (!request) return null;
+  // Renders compact card with Approve / Decline buttons
+}
+```
+
+---
+
+### 9.10 DictionaryTab — word-replacement table
+**File:** `DictionaryTab.tsx` (89 lines) · **Used by:** App.tsx when `tab === "dictionary"`
+
+Simple two-column editable table. Each row: spoken form → replacement.
+
+```tsx
+type DictEntry = { from: string; to: string };
+
+export function DictionaryTab() {
+  const [entries, setEntries] = useState<DictEntry[]>([]);
+  // Renders the table + an "Add" row at the bottom.
+}
+```
+
+Same shape works for any list-of-key-value-pairs config (SnippetsTab,
+HotkeySettings).
+
+---
+
+### 9.11 SnippetsTab — text-expansion triggers
+**File:** `SnippetsTab.tsx` (96 lines) · **Used by:** App.tsx when `tab === "snippets"`
+
+Same shape as DictionaryTab — `trigger → expansion`. Subtle differences:
+expansions are usually multi-line, so the input is a `<textarea>` instead
+of a single-line input.
+
+---
+
+### 9.12 HotkeyRecorder — keyboard combination capture
+**File:** `HotkeyRecorder.tsx` (154 lines) · **Used by:** SettingsModal.HotkeySettings
+
+```tsx
+export function HotkeySettings() {
+  // Renders the current binding + a "Record" button that captures the
+  // next key combination the user presses, then persists it via
+  // window.miniflow.setHotkey().
+}
+```
+
+Listens to `keydown` events while in recording mode. Filters out modifier-
+only events. Shows the captured key combo in pill format (`⌘⇧V`).
+
+---
+
+### 9.13 ProviderPicker — LLM provider selection
+**File:** `ProviderPicker.tsx` (179 lines) · **Used by:** SettingsModal in legacy LLM tab (now superseded by Account tab)
+
+Cards for OpenAI / Groq / Anthropic / Smallest with API key input,
+test-connection button, and an "active provider" radio selector.
+Largely deprecated now that everything routes through Railway, but
+kept for power-user "bring your own key" mode.
+
+---
+
+### 9.14 Mascot — brand illustration + animated waveform
+**File:** `Mascot.tsx` (220 lines) · **Used by:** HomeTab + Onboarding
+
+Exports four components:
+
+```tsx
+type MascotMood = "idle" | "listening" | "processing" | "speaking";
+
+export function UxieMascot({
+  size = 120,
+  mood = "idle",
+  accent = "var(--accent, #d97757)",
+}: MascotProps): JSX.Element
+
+export function UxieMark({
+  size = 28,
+  accent = "var(--accent, #d97757)",
+}: { size?: number; accent?: string }): JSX.Element
+
+export function Waveform({
+  /* size, color, animated, ... */
+}): JSX.Element
+
+export function Flame({
+  size = 28,
+  color = "#d36652",
+  inner = "#f2e2a4",
+}: { size?: number; color?: string; inner?: string }): JSX.Element
+```
+
+The mascot SVG morphs its mouth shape per `mood`. Mouths are SVG path
+strings keyed by mood:
+
+```tsx
+const MOUTH: Record<MascotMood, string> = {
+  idle:      "M 57 76 Q 64 82 71 76 Q 64 79 57 76 Z",
+  listening: "M 55 75 Q 64 86 73 75 Q 64 80 55 75 Z",
+  processing:"M 55 76 Q 64 78 73 76",
+  speaking:  "M 53 73 Q 64 90 75 73 Q 64 84 53 73 Z",
+};
+```
+
+---
+
+### 9.15 Icons — tiny SVG icon set
+**File:** `Icons.tsx` (126 lines) · **Used by:** scattered across sidebar + buttons
+
+All icons are 20×20 stroke SVGs with shared `IconProps`. Add a new
+icon by adding one export. Available exports:
+
+`IconHome`, `IconBook`, `IconSnip`, `IconGear`, `IconHelp`, `IconMic`,
+`IconRocket`, `IconTrophy`, `IconSearch`, `IconCheck`, `IconX`,
+`IconSpark`, `IconArrow`, `IconPlus`, `IconBolt`, `IconChevron`,
+`IconWave`, `IconPlay`.
+
+```tsx
+type IconProps = { size?: number; color?: string; className?: string };
+
+function Icon({ d, size = 20, color = "currentColor", fill = "none",
+                className = "" }: IconProps & { d: string; fill?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 20 20"
+         fill={fill} stroke={color} strokeWidth="1.5"
+         strokeLinecap="round" strokeLinejoin="round"
+         className={className} aria-hidden="true">
+      <path d={d} />
+    </svg>
+  );
+}
+
+export const IconHome = (p: IconProps) => (
+  <Icon {...p} d="M3 10 L10 4 L17 10 V17 H12 V12 H8 V17 H3 Z" />
+);
+// …etc
+```
+
+**Rule:** if you need a new icon, prefer adding it to `Icons.tsx` over
+using emoji or an external icon font. Keep the stroke-width / viewBox
+consistent across the set.
+
+---
+
+## 10. Cookbook — build a working component using only this doc
+
+End-to-end example. We'll build a "Notes" tab with a list-of-notes left
+rail and a markdown editor on the right.
+
+### Step 0 — copy the patterns
+
+Start from `TasksTab.tsx` (closest match). Goal: ~400 lines of TSX, no
+new dependencies, follows every convention in §2-3.
+
+### Step 1 — define the data model
+
+```tsx
+type Note = {
+  id: string;
+  title: string;
+  body: string;
+  updated_at: string;
+};
+```
+
+### Step 2 — the component shell
+
+```tsx
+import React, { useEffect, useState, useCallback } from "react";
+
+const w = window as any;
+
+export function NotesTab() {
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    const r = await w.miniflow.listNotes?.();
+    setNotes(Array.isArray(r?.notes) ? r.notes : []);
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const selected = notes.find(n => n.id === selectedId) ?? null;
+
+  return (
+    <div style={{ display: "flex", height: "100%" }}>
+      <NoteList
+        notes={notes}
+        selectedId={selectedId}
+        onSelect={setSelectedId}
+        onNew={() => {/* create new note via IPC, then refresh */}}
+      />
+      <div style={{ flex: 1, overflow: "auto", padding: "20px 24px" }}>
+        {selected
+          ? <NoteEditor note={selected} onChanged={refresh} />
+          : <div style={{ color: "#888", fontSize: 13, paddingTop: 40 }}>
+              Select a note or click New.
+            </div>}
+      </div>
+    </div>
+  );
+}
+```
+
+### Step 3 — left rail
+
+```tsx
+function NoteList({ notes, selectedId, onSelect, onNew }: {
+  notes: Note[]; selectedId: string | null;
+  onSelect: (id: string) => void; onNew: () => void;
+}) {
+  return (
+    <aside style={{
+      width: 280, borderRight: "1px solid #e5e3df", overflow: "auto",
+      background: "rgba(255,255,255,0.4)",
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between",
+                    alignItems: "center", padding: "16px 16px 8px" }}>
+        <div style={{ fontWeight: 700, fontSize: 15 }}>Notes</div>
+        <button onClick={onNew} style={chipBtn}>+ New</button>
+      </div>
+      {notes.length === 0
+        ? <div style={{ padding: 16, fontSize: 13, color: "#888" }}>
+            No notes yet.
+          </div>
+        : notes.map(n => (
+            <button key={n.id} onClick={() => onSelect(n.id)} style={{
+              display: "block", width: "100%", textAlign: "left",
+              padding: "10px 16px", border: "none",
+              background: selectedId === n.id
+                ? "rgba(0,0,0,0.06)" : "transparent",
+              cursor: "pointer",
+              borderBottom: "1px solid rgba(0,0,0,0.04)",
+            }}>
+              <div style={{ fontSize: 13, fontWeight: 600,
+                            marginBottom: 4, color: "#1a1a1a" }}>
+                {n.title || "(Untitled)"}
+              </div>
+              <div style={{ fontSize: 11, color: "#666" }}>
+                {new Date(n.updated_at).toLocaleDateString()}
+              </div>
+            </button>
+          ))}
+    </aside>
+  );
+}
+```
+
+### Step 4 — right pane (editor with debounced save)
+
+```tsx
+function NoteEditor({ note, onChanged }: {
+  note: Note;
+  onChanged: () => void;
+}) {
+  const [title, setTitle] = useState(note.title);
+  const [body, setBody] = useState(note.body);
+  const saveTimer = useRef<number | null>(null);
+
+  useEffect(() => {
+    setTitle(note.title); setBody(note.body);
+  }, [note.id]);
+
+  // 800 ms debounce — matches the MeetingsTab user-notes pattern
+  useEffect(() => {
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(async () => {
+      await w.miniflow.updateNote?.(note.id, { title, body });
+      onChanged();
+    }, 800);
+    return () => { if (saveTimer.current) window.clearTimeout(saveTimer.current); };
+  }, [title, body, note.id, onChanged]);
+
+  return (
+    <div>
+      <input
+        value={title}
+        onChange={e => setTitle(e.target.value)}
+        placeholder="Untitled"
+        style={{ ...input, width: "100%", fontSize: 18,
+                 fontWeight: 600, marginBottom: 12 }}
+      />
+      <textarea
+        value={body}
+        onChange={e => setBody(e.target.value)}
+        placeholder="Start writing…"
+        rows={20}
+        style={{ ...input, width: "100%", fontFamily: "inherit",
+                 fontSize: 14, lineHeight: 1.6, resize: "vertical" }}
+      />
+    </div>
+  );
+}
+```
+
+### Step 5 — paste the style constants
+
+Drop the canonical block from §8.3 at the bottom of the file. Same
+`input`, `chipBtn`, `card` constants as everywhere else.
+
+### Step 6 — wire up
+
+1. `App.tsx` — extend `SidebarTab` to `"notes"`, render `<NotesTab />`
+2. `Sidebar.tsx` — add nav row with emoji + label
+3. `preload.ts` — add `listNotes`, `updateNote`, `createNote`, `deleteNote`
+4. `main/ipc.ts` — three `ipcMain.handle` calls proxying to engine
+5. `miniflow-engine/main.py` — three entries in the dispatcher dict
+6. `miniflow-engine/notes.py` — SQLite CRUD (mirror `meetings.py` shape)
+
+Total file changes: 6 files. Total new lines: ~600. Total time: 1 day
+of focused work. The patterns above make it mechanical.
+
+---
+
 ## Closing
 
 This document is a contract with future-us. If a decision here proves wrong, update the entry — but record *why* the original reasoning was insufficient. The doc gets MORE useful as we accumulate "we tried X, switched to Y because Z" notes — not less useful.
